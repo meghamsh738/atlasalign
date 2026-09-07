@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "atlasId": "allen_mouse_25um",
+  "atlasVersion": "Allen Mouse CCFv3 2017",
+  "resolutionMicrometers": 25,
+  "coordinateSpace": "left-posterior-superior",
+  "dimensions": [528, 320, 456],
+  "termsUrl": "https://alleninstitute.org/legal/terms-of-use",
+  "citation": "Wang Q et al. The Allen Mouse Brain Common Coordinate Framework: A 3D Reference Atlas. Cell. 2020;181(4):936-953.e20.",
+  "assets": [
+    {
+      "role": "template",
+      "relativePath": "average_template_25.nrrd",
+      "url": "https://download.alleninstitute.org/informatics-archive/current-release/mouse_ccf/average_template/average_template_25.nrrd",
+      "sizeBytes": 32998960,
+      "sha256": "e4a2b483e842b4c8c1b5452d940ea59e14bc1ebaa38fe6a9c3bacac6db2a8f4b"
+    },
+    {
+      "role": "annotation",
+      "relativePath": "annotation_25.nrrd",
+      "url": "https://download.alleninstitute.org/informatics-archive/current-release/mouse_ccf/annotation/ccf_2017/annotation_25.nrrd",
+      "sizeBytes": 4035363,
+      "sha256": "c620cbcc562183e4dcd40250d440130501781f74b41de35b1c1bdabace290c42"
+    },
+    {
+      "role": "ontology",
+      "relativePath": "structure_graph_1.json",
+      "url": "https://api.brain-map.org/api/v2/structure_graph_download/1.json",
+      "sizeBytes": 637735,
+      "sha256": "b5f0d024d1df09ee18aef15093f55240f4a70b3924ee9689add612dadff80386"
+    }
+  ]
+}

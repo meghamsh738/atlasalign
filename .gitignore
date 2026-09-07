@@ -1,0 +1,41 @@
+.DS_Store
+.idea/
+.vscode/
+*.iml
+target/
+**/target/
+
+# Scientific/runtime data: never commit
+external/**
+datasets/**
+models/**
+python/.venv/
+*.tif
+*.tiff
+*.ome.tif
+*.ome.tiff
+*.czi
+*.nd2
+*.lif
+*.oir
+*.vsi
+*.h5
+*.hdf5
+*.n5
+*.zarr
+*.zip
+*.tar
+*.tar.gz
+*.onnx
+*.pt
+*.pth
+
+# Keep empty runtime-data directories visible
+!external/.gitkeep
+!datasets/.gitkeep
+!models/.gitkeep
+
+# Generated community release outputs
+dist/
+__pycache__/
+*.pyc

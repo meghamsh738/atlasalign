@@ -1,0 +1,14 @@
+package org.atlasalign.application.manual;
+
+public enum ManualWorkflowOperation {
+    INITIAL,
+    SET_SECTION_OBSERVATION,
+    CHOOSE_ANATOMICAL_GUIDE,
+    INSERT_AUTOMATIC_TISSUE_OUTLINE,
+    UPSERT_CONTOUR,
+    REMOVE_CONTOUR,
+    COMPLETE_STAGE,
+    ATTACH_PREVIEW_ONLY_RESULT,
+    RESET_STAGE,
+    RESET_ALL
+}

@@ -1,0 +1,12 @@
+cff-version: 1.2.0
+message: "Please cite AtlasAlign Lite and the atlas and scientific tools used in your workflow."
+title: "AtlasAlign Lite"
+version: "0.1.0-beta.1"
+type: software
+authors:
+  - family-names: Konda
+    given-names: Meghamsh Teja
+repository-code: "https://github.com/meghamsh738/atlasalign"
+url: "https://github.com/meghamsh738/atlasalign"
+license: MIT
+abstract: "Reviewer-controlled Allen Mouse Brain CCFv3 alignment and source-coordinate ROI export in Fiji/ImageJ2. Made by Meghamsh Teja Konda; existing contributor notices are retained in LICENSE."

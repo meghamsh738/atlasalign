@@ -1,0 +1,87 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <parent>
+    <groupId>org.atlasalign</groupId>
+    <artifactId>atlasalign-lite</artifactId>
+    <version>0.1.0-beta.1</version>
+  </parent>
+  <artifactId>atlasalign-plugin</artifactId>
+  <name>AtlasAlign Lite Fiji Plugin</name>
+  <description>Fiji/SciJava commands for AtlasAlign Lite.</description>
+  <url>https://github.com/meghamsh738/atlasalign</url>
+  <inceptionYear>2026</inceptionYear>
+  <organization><name>AtlasAlign Lite Project</name><url>https://github.com/meghamsh738/atlasalign</url></organization>
+  <licenses><license><name>MIT License</name><url>https://opensource.org/license/mit</url><distribution>repo</distribution></license></licenses>
+  <developers><developer><id>meghamsh738</id><name>Meghamsh Teja Konda</name><roles><role>founder</role><role>lead</role><role>developer</role><role>debugger</role><role>reviewer</role><role>support</role><role>maintainer</role></roles></developer></developers>
+  <contributors><contributor><name>AtlasAlign Lite contributors</name><roles><role>founder</role><role>lead</role><role>developer</role><role>debugger</role><role>reviewer</role><role>support</role><role>maintainer</role></roles></contributor></contributors>
+  <mailingLists><mailingList><name>AtlasAlign Lite discussions</name><archive>https://github.com/meghamsh738/atlasalign/discussions</archive></mailingList></mailingLists>
+  <scm><connection>scm:git:https://github.com/meghamsh738/atlasalign.git</connection><developerConnection>scm:git:https://github.com/meghamsh738/atlasalign.git</developerConnection><tag>HEAD</tag><url>https://github.com/meghamsh738/atlasalign</url></scm>
+  <issueManagement><system>GitHub Issues</system><url>https://github.com/meghamsh738/atlasalign/issues</url></issueManagement>
+  <ciManagement><system>GitHub Actions</system><url>https://github.com/meghamsh738/atlasalign/actions</url></ciManagement>
+  <properties><license.licenseName>mit</license.licenseName><license.copyrightOwners>AtlasAlign Lite contributors</license.copyrightOwners></properties>
+  <dependencies>
+    <dependency>
+      <groupId>org.atlasalign</groupId>
+      <artifactId>atlasalign-core</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.atlasalign</groupId>
+      <artifactId>atlasalign-application</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.atlasalign</groupId>
+      <artifactId>atlasalign-io</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.atlasalign</groupId>
+      <artifactId>atlasalign-atlas</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.atlasalign</groupId>
+      <artifactId>atlasalign-deepslice-adapter</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.scijava</groupId>
+      <artifactId>scijava-common</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>net.imagej</groupId>
+      <artifactId>ij</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>ome</groupId>
+      <artifactId>formats-bsd</artifactId>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>com.fasterxml.jackson.core</groupId>
+      <artifactId>jackson-databind</artifactId>
+      <version>${atlasalign.jackson.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+  <build>
+    <plugins>
+      <plugin>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <configuration>
+          <systemPropertyVariables>
+            <java.awt.headless>true</java.awt.headless>
+          </systemPropertyVariables>
+        </configuration>
+      </plugin>
+    </plugins>
+  </build>
+</project>
