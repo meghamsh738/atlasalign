@@ -10,10 +10,11 @@
 
 ## Publication approvals and remaining distribution work
 
-- [x] Approve creation of public `meghamsh738/atlasalign` from the clean snapshot.
-- [x] Approve uploading source and `0.1.0-beta.1` release artifacts.
-- [ ] Repeat the prepared CI workflow in the new public repository after creation;
-  report automated build/smoke evidence separately from native GUI validation.
+- [x] Approved public `meghamsh738/atlasalign` created from the clean snapshot.
+- [x] Approved source and `0.1.0-beta.1` release artifacts published.
+- [x] Public Windows/macOS/Linux tests, packaging and Java 17 loading checks
+  passed in [run 34169378054](https://github.com/meghamsh738/atlasalign/actions/runs/34169378054).
+  Native GUI evidence remains limited to the documented macOS checks.
 - [ ] Approve the hosting/account request; account owner completes credentials/terms.
 - [ ] Approve Updater upload after site assignment and review its dependency metadata.
 - [ ] Verify clean Fiji installation from the update site.
