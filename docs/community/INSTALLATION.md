@@ -2,6 +2,8 @@
 
 Target: Fiji/ImageJ2 with Java 17 or newer. Start with a separate Fiji copy for
 beta evaluation. The release bundle is an add-on, not a complete Fiji distribution.
+Use this online guide for current compatibility notes; the beta ZIP includes
+an earlier snapshot of these instructions.
 The desktop app may be called `Fiji.app`; its root contains `jars` and `plugins`.
 
 ## Get Fiji and the plugin
@@ -26,12 +28,20 @@ The desktop app may be called `Fiji.app`; its root contains `jars` and `plugins`
 3. Copy the six `plugins/atlasalign-*-0.1.0-beta.1.jar` files into Fiji's
    `plugins` directory. Remove earlier **AtlasAlign** versions from that directory
    and `jars` first, keeping a backup outside Fiji.
-4. The bundle's `jars` directory contains Jackson core, annotations and databind
-   2.18.0. If none are present, copy all three JARs into Fiji's `jars` directory.
-   If Fiji already has these exact filenames and hashes, keep its copies.
-   If another Jackson version is present, do not create duplicate versions: use
-   a separate test Fiji and resolve the dependency through Fiji's Updater before
-   proceeding. Other installed plugins may rely on their current Jackson version.
+4. Check Fiji's `jars` directory for **`jackson-core`**, **`jackson-annotations`**
+   and **`jackson-databind`** before copying any dependencies:
+   - **Latest Fiji with all three at 2.19.2:** keep Fiji's copies and skip the
+     bundle's `jars` directory. The released plugin was checked with this trio
+     for command loading, safe previews and mock-image ROI exports.
+   - **All three at 2.18.0 with the bundle's exact filenames and hashes:** keep
+     Fiji's copies.
+   - **None of those three libraries present:** copy the bundle's three 2.18.0
+     JARs into Fiji's `jars` directory.
+   - **Missing members, mixed versions or another version:** do not add a
+     second version or downgrade Fiji's libraries. Use a separate Fiji copy
+     with a supported trio above; report the filenames if you need help.
+   Other Jackson modules (such as `jackson-dataformat-xml`) are separate
+   libraries; leave them unchanged. Do not replace the entire `jars` directory.
 5. Restart Fiji. **Plugins → AtlasAlign Lite → About AtlasAlign Lite** should
    report `0.1.0-beta.1`. Use **Atlas Setup** to configure the atlas.
 
