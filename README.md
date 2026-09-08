@@ -1,19 +1,41 @@
-# AtlasAlign Lite
+# AtlasAlign Lite — Open-source image alignment for Fiji / ImageJ
 
 **Made by Meghamsh Teja Konda** · MIT project code · **0.1.0-beta.1**
 
-A Fiji/ImageJ2 plugin for reviewer-controlled Allen Mouse Brain CCFv3 alignment,
-region selection, and source-coordinate ROI and image exports. It supports
-single sections and resumable batches, including multiple sections on one slide.
+AtlasAlign Lite is an **open-source image alignment and atlas registration
+plugin for Fiji / ImageJ2**. It helps researchers align mouse brain microscopy
+sections to the **Allen Mouse Brain Common Coordinate Framework (CCFv3)**,
+review anatomical regions, and export regions of interest (ROIs) in the original
+image coordinates. It supports single sections and resumable batches, including
+multiple sections on one slide.
 
 Open an image → choose a section → review alignment → select regions → export.
 The original image stays read-only. Alignment previews use separate buffers;
 acceptance and export include source-integrity checks. Anatomical decisions
 remain the reviewer's responsibility.
 
+## Image alignment and brain atlas registration
+
+Designed for researchers working with mouse brain histology and microscopy,
+including immunofluorescence (IF) images. The workflow combines:
+
+- **Reviewer-controlled alignment:** choose an atlas plane and review tissue
+  orientation, transforms and local refinement against your section image.
+- **Anatomical ROI selection:** select and edit brain-region ROIs using the
+  Allen CCFv3 atlas as a reference.
+- **Source-coordinate exports:** export ROI images, crops and masks for further
+  analysis while preserving the original source image.
+- **Batch section review:** navigate multiple sections on one slide and save a
+  project to resume the review later.
+
+Here, image registration means aligning a tissue section with a brain atlas.
+AtlasAlign focuses on this anatomical workflow; it does not provide general
+photo stitching or fully automatic registration of arbitrary image pairs.
+Every anatomical alignment requires human review.
+
 ## Watch the demo and try the example
 
-[![Watch the 3-minute AtlasAlign Lite demo](docs/community/media/demo-poster.png)](https://github.com/meghamsh738/atlasalign/releases/download/v0.1.0-beta.1/atlasalign-workflow-demo.mp4)
+[![AtlasAlign Lite Fiji image alignment demo showing brain atlas registration and ROI exports](docs/community/media/demo-poster.png)](https://github.com/meghamsh738/atlasalign/releases/download/v0.1.0-beta.1/atlasalign-workflow-demo.mp4)
 
 **[Watch/download the demo (MP4, 3:10)](https://github.com/meghamsh738/atlasalign/releases/download/v0.1.0-beta.1/atlasalign-workflow-demo.mp4)** ·
 **[Download the mock IF example (TIFF, 24.1 MiB)](https://github.com/meghamsh738/atlasalign/releases/download/v0.1.0-beta.1/mock-if-example.tif)** ·
