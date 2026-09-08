@@ -11,6 +11,21 @@ The original image stays read-only. Alignment previews use separate buffers;
 acceptance and export include source-integrity checks. Anatomical decisions
 remain the reviewer's responsibility.
 
+## Watch the demo and try the example
+
+[![Watch the 3-minute AtlasAlign Lite demo](docs/community/media/demo-poster.png)](https://github.com/meghamsh738/atlasalign/releases/download/v0.1.0-beta.1/atlasalign-workflow-demo.mp4)
+
+**[Watch/download the demo (MP4, 3:10)](https://github.com/meghamsh738/atlasalign/releases/download/v0.1.0-beta.1/atlasalign-workflow-demo.mp4)** ·
+**[Download the mock IF example (TIFF, 24.1 MiB)](https://github.com/meghamsh738/atlasalign/releases/download/v0.1.0-beta.1/mock-if-example.tif)** ·
+**[Installation guide](docs/community/INSTALLATION.md)**
+
+The video shows manual alignment, editable ROIs, actual exported crop/mask
+previews, and a labeled batch-mode screenshot walkthrough. See the
+[demo and example guide](docs/community/DEMO.md) for the steps and export locations.
+Only the author's mock IF image is provided as a microscopy example; the batch
+slide pictured in the video is not included. The footage uses an earlier review
+UI and is a workflow demonstration, not an anatomical benchmark.
+
 ## Install and start
 
 Requires **Fiji/ImageJ2 and Java 17 or newer**. Python is not required for manual

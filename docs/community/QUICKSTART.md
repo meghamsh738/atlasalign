@@ -4,7 +4,10 @@ Install the plugin and finish **Atlas Setup** first. For real work open your
 original image in Fiji and select the structural channel you intend to review.
 Source pixels and calibration stay unchanged; exports use source coordinates.
 
-For a redistributable UI demonstration, open `demo/synthetic-slide.ijm` in Fiji's
+For the recorded microscopy workflow, download the author's
+[mock IF example and watch the demo](DEMO.md).
+
+For a synthetic UI demonstration, open `demo/synthetic-slide.ijm` in Fiji's
 Script Editor and run it as an ImageJ macro. It creates three synthetic ovals
 in a new 16-bit image. The macro is original project code under MIT. It is a
 navigation fixture, **not anatomical microscopy and not an alignment benchmark**.
