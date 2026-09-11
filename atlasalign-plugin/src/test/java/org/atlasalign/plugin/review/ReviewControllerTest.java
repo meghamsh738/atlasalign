@@ -4122,6 +4122,80 @@ class ReviewControllerTest {
     }
 
     @Test
+    void clippingSwitchIsVisibleAndPreservesAlignmentAndDrawnRois() throws Exception {
+        final var basis = ReviewPluginFixtures.segmentedScaledAtlasBasis();
+        final var session = new AlignmentReviewSession(basis);
+        final var controller = new ReviewController(session,
+                ReviewPluginFixtures.segmentedPreview(),
+                new CatalogPlaneSource(false, false),
+                () -> new ReviewAcceptanceVerification(basis.sourceSnapshot(), basis.atlas()),
+                Runnable::run, Runnable::run);
+        SwingUtilities.invokeAndWait(() -> {
+            final var panel = new SwingReviewPanel(controller);
+            controller.attach(panel);
+            applyConfirmedOutline(controller, basis);
+            controller.setTissueClippingEnabled(true);
+            findNamed(panel, "workflowStep4", JButton.class).doClick();
+            final var rois = panel.manualRoiSessionForTests();
+            rois.newPolygon("Keep exact ROI", ReviewerRoiSide.LEFT, RoiPartOperation.ADD);
+            rois.addVertex(new Point2D(10, 10));
+            rois.addVertex(new Point2D(40, 10));
+            rois.addVertex(new Point2D(40, 40));
+            rois.addVertex(new Point2D(10, 40));
+            rois.finishActivePart();
+            final var roiBefore = rois.snapshot();
+            final var before = session.state().content();
+            assertTrue(before.tissueClippingEnabled());
+            assertTrue(before.outlineWarp().isPresent());
+            final var clipping = findNamed(panel, "displayTissueClipping", JCheckBox.class);
+            assertEquals("interactionToolbarRow", clipping.getParent().getName(),
+                    "the clipping control must be directly available, not hidden in View");
+            assertTrue(clipping.isVisible() && clipping.isEnabled());
+            clipping.doClick();
+            final var after = session.state().content();
+            assertFalse(after.tissueClippingEnabled());
+            assertFalse(panel.canvas().tissueClippingEnabled());
+            assertEquals(before.outlineWarp(), after.outlineWarp());
+            assertEquals(before.hemisphereWarp(), after.hemisphereWarp());
+            assertEquals(before.localWarp(), after.localWarp());
+            assertEquals(before.manualSidePlacement(), after.manualSidePlacement());
+            assertEquals(before.reviewedTissueSupport(), after.reviewedTissueSupport());
+            assertEquals(roiBefore, rois.snapshot());
+            controller.undo();
+            assertTrue(clipping.isSelected());
+            assertTrue(panel.canvas().tissueClippingEnabled());
+            assertEquals(before, session.state().content());
+            assertEquals(roiBefore, rois.snapshot());
+        });
+    }
+
+    @Test
+    void setupCropDisclosureEnablesBoundaryHandlesWithoutEditingAlignment() throws Exception {
+        final var basis = ReviewPluginFixtures.segmentedScaledAtlasBasis();
+        final var session = new AlignmentReviewSession(basis);
+        final var controller = new ReviewController(session,
+                ReviewPluginFixtures.segmentedPreview(),
+                new CatalogPlaneSource(false, false),
+                () -> new ReviewAcceptanceVerification(basis.sourceSnapshot(), basis.atlas()),
+                Runnable::run, Runnable::run);
+        SwingUtilities.invokeAndWait(() -> {
+            final var panel = new SwingReviewPanel(controller);
+            controller.attach(panel);
+            final var before = session.state().content();
+            final long revision = session.state().contentRevision();
+            final var disclosure = findNamed(panel, "showTissueCropControls", JCheckBox.class);
+            disclosure.doClick();
+            assertTrue(panel.canvas().tissueSupportEditing(),
+                    "Edit tissue crop must activate handles, not merely show drawing buttons");
+            assertEquals(ReviewCanvas.InteractionTool.POINTS, panel.canvas().interactionTool());
+            disclosure.doClick();
+            assertFalse(panel.canvas().tissueSupportEditing());
+            assertEquals(before, session.state().content());
+            assertEquals(revision, session.state().contentRevision());
+        });
+    }
+
+    @Test
     void persistentWorkflowActionsAreNotHorizontallyClippedAtSupportedSizes()
             throws Exception {
         final AlignmentReviewBasis basis = ReviewPluginFixtures.basis();
@@ -4219,7 +4293,8 @@ class ReviewControllerTest {
             assertTrue(SwingReviewPanel.workflowGuideText()
                     .contains("Create from guide"));
 
-            findNamed(panel, "manualRoiMoreDrawing", javax.swing.JToggleButton.class).doClick();
+            assertTrue(findNamed(panel, "manualRoiMoreDrawing", javax.swing.JToggleButton.class).isSelected(),
+                    "Drawing and Fiji import tools are exposed by default");
             for (final Dimension size : List.of(
                     new Dimension(1280, 800),
                     new Dimension(1024, 768))) {
@@ -4606,7 +4681,7 @@ class ReviewControllerTest {
     }
 
     @Test
-    void legacyGenericSimilarityControlsAreNotExposed()
+    void explicitLandmarkModeExposesGuardedSimilarityAndAffineControls()
             throws Exception {
         final AlignmentReviewBasis basis =
                 ReviewPluginFixtures.basis();
@@ -4624,16 +4699,20 @@ class ReviewControllerTest {
             final SwingReviewPanel panel =
                     new SwingReviewPanel(controller);
             controller.attach(panel);
-            assertThrows(IllegalArgumentException.class,
-                    () -> findButton(panel, "Fit similarity (0 points)"));
-            assertThrows(IllegalArgumentException.class,
-                    () -> findButton(panel, "Fit global affine (0 points)"));
+            final JButton similarity = findButton(panel, "Fit similarity (0 points)");
+            final JButton affine = findButton(panel, "Fit global affine (0 points)");
+            assertFalse(visibleWithin(panel, similarity));
+            findNamed(panel, "workflowStep3", JButton.class).doClick();
+            findNamed(panel, "landmarksMode", JButton.class).doClick();
+            assertTrue(visibleWithin(panel, similarity)); assertTrue(visibleWithin(panel, affine));
+            assertFalse(similarity.isEnabled()); assertFalse(affine.isEnabled());
+            assertEquals(ReviewCanvas.InteractionTool.LANDMARKS, panel.canvas().interactionTool());
         });
         assertTrue(session.state().content().activeLandmarks().isEmpty());
     }
 
     @Test
-    void legacyGenericLocalWarpControlsAreNotExposed()
+    void explicitLandmarkModeExposesGuardedLocalWarpControls()
             throws Exception {
         final AlignmentReviewBasis basis = ReviewPluginFixtures.basis();
         final AlignmentReviewSession session = new AlignmentReviewSession(basis);
@@ -4647,9 +4726,11 @@ class ReviewControllerTest {
         SwingUtilities.invokeAndWait(() -> {
             final SwingReviewPanel panel = new SwingReviewPanel(controller);
             controller.attach(panel);
-            assertThrows(IllegalArgumentException.class,
-                    () -> findButton(panel,
-                            "Fit generic local warp (0 FIT)"));
+            final JButton fit = findButton(panel, "Fit generic local warp (0 FIT)");
+            assertFalse(visibleWithin(panel, fit));
+            findNamed(panel, "workflowStep3", JButton.class).doClick();
+            findNamed(panel, "landmarksMode", JButton.class).doClick();
+            assertTrue(visibleWithin(panel, fit)); assertFalse(fit.isEnabled());
             final JButton clear = findButton(panel, "Clear internal warp");
             assertFalse(clear.isEnabled());
             assertTrue(session.state().content().localWarp().isEmpty());
@@ -5150,6 +5231,14 @@ class ReviewControllerTest {
                         .message().orElse(""));
         controller.applyStructureChanges();
         return identifiers;
+    }
+
+    private static boolean visibleWithin(final Container root, Component child) {
+        while (child != null && child != root) {
+            if (!child.isVisible()) return false;
+            child = child.getParent();
+        }
+        return child == root;
     }
 
     private static JButton findButton(

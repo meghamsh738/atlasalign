@@ -32,7 +32,7 @@ jobs:
         run: python scripts/package_beta.py --output dist
       - name: Check bundle and launch Java on this platform
         working-directory: public-source
-        run: python scripts/smoke_bundle.py dist/atlasalign-lite-0.1.0-beta.1
+        run: python scripts/smoke_bundle.py dist/atlasalign-lite-0.1.0-beta.3
       - uses: actions/upload-artifact@v4
         with:
           name: beta-${{ matrix.os }}

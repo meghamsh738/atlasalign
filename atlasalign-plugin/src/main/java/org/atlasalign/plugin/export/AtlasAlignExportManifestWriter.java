@@ -8,6 +8,8 @@ import java.io.IOException;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Objects;
+import java.util.Optional;
+import org.atlasalign.application.export.ExportSelection;
 import org.atlasalign.application.AcceptedAlignmentSnapshot;
 import org.atlasalign.application.AtlasAssetVerification;
 import org.atlasalign.core.AffineTransform2D;
@@ -45,6 +47,15 @@ final class AtlasAlignExportManifestWriter {
             final String annotationPlaneSha256,
             final List<String> warnings,
             final List<Artifact> artifacts) {
+        write(destination, sourceName, accepted, pluginVersion, bioFormatsVersion,
+                annotationPlaneSha256, warnings, artifacts, Optional.empty());
+    }
+
+    void write(final Path destination, final String sourceName,
+            final AcceptedAlignmentSnapshot accepted, final String pluginVersion,
+            final String bioFormatsVersion, final String annotationPlaneSha256,
+            final List<String> warnings, final List<Artifact> artifacts,
+            final Optional<ExportSelection> selection) {
         final AcceptedAlignmentSnapshot snapshot = Objects.requireNonNull(
                 accepted, "accepted");
         final ObjectNode root = MAPPER.createObjectNode();
@@ -80,7 +91,18 @@ final class AtlasAlignExportManifestWriter {
         footprintApplication.put("coordinateSpace", "SOURCE_PIXEL");
         footprintApplication.put("axes", "XY");
         footprintApplication.put(
-                "reusedUnchangedAcrossAllChannelsSlicesFrames", true);
+                "reusedUnchangedAcrossAllChannelsSlicesFrames", selection.isEmpty());
+        root.put("scope", selection.isPresent() ? "selected-channels-pinned-plane" : "legacy-all-czt");
+        selection.ifPresent(value -> {
+            final ObjectNode scope = root.putObject("exportSelection");
+            final ArrayNode channels = scope.putArray("sourceChannelsOneBased");
+            value.channels().forEach(channels::add);
+            scope.put("sourceSliceOneBased", value.slice());
+            scope.put("sourceFrameOneBased", value.frame());
+            scope.put("outputSizeC", value.channels().size());
+            scope.put("outputSizeZ", 1);
+            scope.put("outputSizeT", 1);
+        });
 
         final ObjectNode atlas = root.putObject("atlas");
         atlas.put("id", snapshot.verifiedAtlas().atlasId());
@@ -209,7 +231,7 @@ final class AtlasAlignExportManifestWriter {
                 .forEach(warningArray::add);
         final ArrayNode outputs = root.putArray("outputs");
         List.copyOf(Objects.requireNonNull(artifacts, "artifacts"))
-                .forEach(artifact -> appendArtifact(outputs, artifact));
+                .forEach(artifact -> appendArtifact(outputs, artifact, selection.isEmpty()));
         try {
             MAPPER.writeValue(destination.toFile(), root);
         } catch (final IOException error) {
@@ -272,7 +294,8 @@ final class AtlasAlignExportManifestWriter {
 
     private static void appendArtifact(
             final ArrayNode outputs,
-            final Artifact artifact) {
+            final Artifact artifact,
+            final boolean allSourcePlanes) {
         final ObjectNode item = outputs.addObject();
         item.put("kind", artifact.kind());
         item.put("fileName", artifact.fileName());
@@ -300,7 +323,7 @@ final class AtlasAlignExportManifestWriter {
         item.put("sourceOriginY", fullSource
                 ? 0 : footprint.bounds().minimumY());
         item.put("footprintAppliedAcrossAllSourceCztPlanes",
-                "masked_crop".equals(artifact.kind()));
+                allSourcePlanes && "masked_crop".equals(artifact.kind()));
         appendArtifactSemantics(item, artifact.kind());
         final ArrayNode regions = item.putArray("regions");
         footprint.selections().forEach(selection -> {

@@ -36,7 +36,12 @@ def export(destination):
         if source.is_symlink() or not source.is_file():
             raise ValueError("Unsafe source entry: " + name)
         data = source.read_bytes()
-        text = data.decode("utf-8")
+        if name == "docs/community/media/demo-poster.png":
+            if not data.startswith(bytes([137, 80, 78, 71, 13, 10, 26, 10])):
+                raise ValueError("Invalid public demo poster: " + name)
+            text = ""
+        else:
+            text = data.decode("utf-8")
         # Literal fragments assembled here so the exporter can include itself.
         blocked = ("/" + "Users/", "/" + "Volumes/", "github.com/meghamsh738/" + "atlasalign-lite", "PRIVATE" + " KEY-----")
         if any(token in text for token in blocked):

@@ -35,6 +35,57 @@ import org.junit.jupiter.api.Test;
 class ReviewCanvasInteractionTest {
 
     @Test
+    void numericMoveRotateAndScaleEachCommitOneChangeAndUndoExactly() throws Exception {
+        SwingUtilities.invokeAndWait(() -> {
+            final var basis = ReviewPluginFixtures.scaledAtlasBasis();
+            final var review = new ReviewController(new AlignmentReviewSession(basis), ReviewPluginFixtures.preview(), ReviewPluginFixtures::plane,
+                    () -> new ReviewAcceptanceVerification(basis.sourceSnapshot(), basis.atlas()), Runnable::run, Runnable::run);
+            final var panel = new SwingReviewPanel(review); review.attach(panel);
+            final CanvasContext context = new CanvasContext(panel.canvas(), review);
+            final ReviewCanvas canvas = context.canvas();
+            canvas.setInteractionTool(ReviewCanvas.InteractionTool.TRANSFORM);
+            for (final Runnable edit : List.<Runnable>of(() -> canvas.translateSourcePixels(3, -2),
+                    () -> canvas.rotateDegrees(4), () -> canvas.scalePercent(105, 117))) {
+                final var before = context.controller().state().content();
+                final long revision = context.controller().state().contentRevision();
+                edit.run();
+                assertEquals(revision + 1, context.controller().state().contentRevision());
+                assertNotEquals(before, context.controller().state().content());
+                context.controller().undo();
+                assertEquals(before, context.controller().state().content());
+            }
+            context.controller().close();
+        });
+    }
+
+    @Test
+    void canvasArrowNudgesUseSourcePixelsAndInspectionCannotEditGeometry() throws Exception {
+        SwingUtilities.invokeAndWait(() -> {
+            final CanvasContext context = context();
+            final ReviewCanvas canvas = context.canvas();
+            canvas.setInteractionTool(ReviewCanvas.InteractionTool.TRANSFORM);
+            final Point2D before = context.controller().state().content().manualPreviewAdjustment().apply(new Point2D(0, 0));
+            final long revision = context.controller().state().contentRevision();
+            final var metadata = context.controller().state().basis().sourceSnapshot().metadata();
+            final double expected = (double) context.controller().state().basis().previewDimensions().width() / metadata.width();
+            final Object arrow = canvas.getInputMap(JComponent.WHEN_FOCUSED).get(KeyStroke.getKeyStroke(KeyEvent.VK_RIGHT, 0));
+            canvas.getActionMap().get(arrow).actionPerformed(new ActionEvent(canvas, 0, "nudge"));
+            assertEquals(revision + 1, context.controller().state().contentRevision());
+            assertEquals(before.x() + expected, context.controller().state().content().manualPreviewAdjustment().apply(new Point2D(0, 0)).x(), 1e-12);
+            context.controller().undo();
+            assertEquals(before, context.controller().state().content().manualPreviewAdjustment().apply(new Point2D(0, 0)));
+            final Object shifted = canvas.getInputMap(JComponent.WHEN_FOCUSED).get(KeyStroke.getKeyStroke(KeyEvent.VK_RIGHT, KeyEvent.SHIFT_DOWN_MASK));
+            canvas.getActionMap().get(shifted).actionPerformed(new ActionEvent(canvas, 0, "nudge"));
+            assertEquals(before.x() + 10 * expected, context.controller().state().content().manualPreviewAdjustment().apply(new Point2D(0, 0)).x(), 1e-12);
+            final var pinned = context.controller().state();
+            canvas.requestChannelDisplay("Inspecting Z2", true);
+            canvas.getActionMap().get(arrow).actionPerformed(new ActionEvent(canvas, 0, "nudge"));
+            canvas.rotateDegrees(2); canvas.scalePercent(120, 120);
+            assertEquals(pinned, context.controller().state());
+        });
+    }
+
+    @Test
     void reviewerPolygonTraceIsCanvasModalAndInstallsOneSupportRevision()
             throws Exception {
         SwingUtilities.invokeAndWait(() -> {
@@ -1227,7 +1278,7 @@ class ReviewCanvasInteractionTest {
     }
 
     @Test
-    void resizeHandlesUseFreeAxesUnlessShiftPreservesProportions()
+    void resizeHandlesStartLockedAndExplicitUnlockAllowsFreeAxes()
             throws Exception {
         SwingUtilities.invokeAndWait(() -> {
             final ReviewCanvas edgeCanvas = canvas();
@@ -1251,10 +1302,11 @@ class ReviewCanvasInteractionTest {
             drag(edgeCanvas, edgeHandles.get(5), 16, 0,
                     true, false);
             assertTrue(edgeScale.get()[0] > 1);
-            assertEquals(1, edgeScale.get()[1], 1e-12,
-                    "an unmodified side-handle drag changes one axis only");
+            assertEquals(edgeScale.get()[0], edgeScale.get()[1], 1e-12,
+                    "proportions are locked by default");
 
             final ReviewCanvas shiftedEdgeCanvas = canvas();
+            shiftedEdgeCanvas.setAspectRatioLocked(false);
             final AtomicReference<double[]> shiftedEdgeScale =
                     new AtomicReference<>();
             shiftedEdgeCanvas.setInteractionListener(
@@ -1278,6 +1330,7 @@ class ReviewCanvasInteractionTest {
                     "Shift must keep proportions from an edge handle");
 
             final ReviewCanvas cornerCanvas = canvas();
+            cornerCanvas.setAspectRatioLocked(false);
             final AtomicReference<double[]> cornerScale =
                     new AtomicReference<>();
             cornerCanvas.setInteractionListener(
@@ -1299,6 +1352,7 @@ class ReviewCanvasInteractionTest {
                     "a corner drag without Shift must permit free aspect ratio");
 
             final ReviewCanvas shiftedCornerCanvas = canvas();
+            shiftedCornerCanvas.setAspectRatioLocked(false);
             final AtomicReference<double[]> shiftedCornerScale =
                     new AtomicReference<>();
             shiftedCornerCanvas.setInteractionListener(
@@ -1364,7 +1418,7 @@ class ReviewCanvasInteractionTest {
                     "the safe sample before the rejected move must survive");
             assertTrue(committed.get()[0] <= 1.15,
                     "release at an unsafe location must retain last-safe scale");
-            assertEquals(1, committed.get()[1], 1e-12);
+            assertEquals(committed.get()[0], committed.get()[1], 1e-12);
         });
     }
 

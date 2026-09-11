@@ -132,7 +132,7 @@ class SwingReviewPanelTiltDiagnosticTest {
             assertTrue(direct.isSelected());
             final JPopupMenu popup = ((JButton) findButton(panel, "View ▾"))
                     .getComponentPopupMenu();
-            assertTrue(findNamed(popup, "displayTissueClipping",
+            assertTrue(findNamed(panel, "displayTissueClipping",
                     JCheckBox.class).isSelected());
             assertTrue(findNamed(popup, "displayDisplacementLines",
                     JCheckBox.class).isSelected());
@@ -487,9 +487,6 @@ class SwingReviewPanelTiltDiagnosticTest {
             assertFalse(containsTabbedPane(panel));
             assertFalse(allButtonLabels(panel).stream().anyMatch(text ->
                     text.contains("guided manual workflow")
-                            || text.contains("fit similarity")
-                            || text.contains("fit global affine")
-                            || text.contains("generic local warp")
                             || text.equals("t fit")
                             || text.equals("a fit")
                             || text.equals("fit both")));

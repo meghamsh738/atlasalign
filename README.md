@@ -1,6 +1,6 @@
 # AtlasAlign Lite — Open-source image alignment for Fiji / ImageJ
 
-**Made by Meghamsh Teja Konda** · MIT project code · **0.1.0-beta.1**
+**Made by Meghamsh Teja Konda** · MIT project code · **0.1.0-beta.3**
 
 AtlasAlign Lite is an **open-source image alignment and atlas registration
 plugin for Fiji / ImageJ2**. It helps researchers align mouse brain microscopy
@@ -48,6 +48,13 @@ Only the author's mock IF image is provided as a microscopy example; the batch
 slide pictured in the video is not included. The footage uses an earlier review
 UI and is a workflow demonstration, not an anatomical benchmark.
 
+## New in beta.3
+
+- Inspect individual channels or composites while registration stays pinned to your selected channel, Z plane and timepoint.
+- Export selected source channels from the reviewed optical plane independently of display colors and contrast.
+- Save and reopen complete review projects, including alignment, ROI drafts, display settings and batch checkpoints.
+- Use clearer Move, Rotate, Scale and numeric placement controls.
+
 ## Install and start
 
 Requires **Fiji/ImageJ2 and Java 17 or newer**. Python is not required for manual
@@ -69,7 +76,7 @@ later with the original source image open.
 
 ## Beta status
 
-Download the **[0.1.0-beta.1 release](https://github.com/meghamsh738/atlasalign/releases/tag/v0.1.0-beta.1)**
+Download the **[0.1.0-beta.3 release](https://github.com/meghamsh738/atlasalign/releases/tag/v0.1.0-beta.3)**
 and read the [release notes and validation status](docs/community/RELEASE_NOTES.md).
 Automated tests, packaging and Java 17 loading checks passed on Windows, macOS
 and Linux before release. See the [public build workflow](https://github.com/meghamsh738/atlasalign/actions/workflows/beta.yml).

@@ -37,6 +37,7 @@ import org.atlasalign.application.InitialPlaneSource;
 import org.atlasalign.application.ManualFallbackReason;
 import org.atlasalign.application.MaskRegistrationEngine;
 import org.atlasalign.application.RegistrationPreview;
+import org.atlasalign.application.RegistrationInput;
 import org.atlasalign.application.ReviewAcceptanceVerification;
 import org.atlasalign.application.ReviewAcceptanceVerifier;
 import org.atlasalign.application.ReviewPreviewDimensions;
@@ -95,17 +96,22 @@ public final class ReviewAlignmentCommand implements Command {
     static final Duration DEEPSLICE_TIMEOUT = Duration.ofMinutes(30);
     static final double MINIMUM_OBLIQUE_ATLAS_TISSUE_RETENTION = 0.5;
 
-    @Parameter(
-            label = "Source image",
-            callback = "sourceImageChanged")
+    @Parameter(label = "Source image")
     private ImagePlus sourceImage;
 
+    // Intake supplies the current-channel default. This worker keeps explicit
+    // C/Z/T inputs unchanged; callers that omit them retain the C1/Z1/T1 defaults.
     @Parameter(
             label = "Registration channel (1-based)",
-            initializer = "initializeRegistrationChannel",
             min = "1",
             persist = false)
     private int registrationChannel = 1;
+
+    @Parameter(label = "Optical Z (1-based)", min = "1", persist = false)
+    private int registrationSlice = 1;
+
+    @Parameter(label = "Time point (1-based)", min = "1", persist = false)
+    private int registrationFrame = 1;
 
     @Parameter(
             label = "Maximum preview dimension (pixels)",
@@ -179,6 +185,18 @@ public final class ReviewAlignmentCommand implements Command {
             visibility = ItemVisibility.INVISIBLE)
     private String manualRoiDraftPath = "";
 
+    /** Explicit new basis; callers save the preceding project before launching. */
+    public static void startNewManualReview(final ImagePlus source, final Path atlas,
+            final RegistrationInput input, final int atlasLevel, final int previewLimit) {
+        final ReviewAlignmentCommand command = new ReviewAlignmentCommand();
+        command.sourceImage = java.util.Objects.requireNonNull(source);
+        command.atlasCacheDirectory = atlas.toFile();
+        command.registrationChannel = input.channel(); command.registrationSlice = input.slice(); command.registrationFrame = input.frame();
+        command.initialCoronalLevel = atlasLevel; command.maximumPreviewDimension = previewLimit;
+        command.log = new org.scijava.log.StderrLogService();
+        command.run();
+    }
+
     @Override
     public void run() {
         if (GraphicsEnvironment.isHeadless()) {
@@ -191,6 +209,8 @@ public final class ReviewAlignmentCommand implements Command {
     }
 
     private void launchReview() {
+        final RegistrationInput registrationInput = new RegistrationInput(
+                registrationChannel, registrationSlice, registrationFrame);
         final Path runtimePath = deepSliceRuntimeDirectory.toPath()
                 .toAbsolutePath().normalize();
         final Path workPath = deepSliceWorkDirectory.toPath()
@@ -211,7 +231,7 @@ public final class ReviewAlignmentCommand implements Command {
                             workPath)) {
                 launch = prepareReview(
                         sourceImage,
-                        registrationChannel,
+                        registrationInput,
                         maximumPreviewDimension,
                         initialCoronalLevel,
                         atlasPath,
@@ -221,7 +241,7 @@ public final class ReviewAlignmentCommand implements Command {
         } else {
             launch = prepareReview(
                     sourceImage,
-                    registrationChannel,
+                    registrationInput,
                     maximumPreviewDimension,
                     initialCoronalLevel,
                     atlasPath,
@@ -348,6 +368,7 @@ public final class ReviewAlignmentCommand implements Command {
                         copiedPreview,
                         launch.atlasPlaneSource(),
                         liveVerifier);
+        controller.initializeImageScope(registrationInput);
         final ImagePlusSourcePixelReader sourceReader =
                 new ImagePlusSourcePixelReader(sourceImage);
         final SourceSpaceExportService exportService =
@@ -368,23 +389,30 @@ public final class ReviewAlignmentCommand implements Command {
                     Path.of(manualRoiDraftPath), checkedSectionId(),
                     previewMapping.sourceWidth(),
                     previewMapping.sourceHeight(),
-                    launch.safePreview().verifiedSource().pixelSha256());
+                    launch.safePreview().verifiedSource().pixelSha256(),
+                    registrationInput, controller::exportSelection);
             manualRoiSession = manualRoiStore.loadOrCreate();
-            manualRoiStore.bind(manualRoiSession);
+            if (ManualRoiSessionStore.recordedInput(Path.of(manualRoiDraftPath)).isPresent()) {
+                controller.setExportSelection(ManualRoiSessionStore.recordedExportSelection(
+                        Path.of(manualRoiDraftPath), launch.safePreview().verifiedSource().metadata()));
+            }
+            manualRoiStore.bind(manualRoiSession, controller);
         }
         final Optional<ManualRoiExportService.ParentSourceContext>
                 parentContext = parentSourceContext();
         final ManualRoiExportService manualRoiExportService =
                 new ManualRoiExportService(sourceReader,
                         launch.safePreview().verifiedSource(),
-                        registrationChannel,
-                        Math.max(1, sourceImage.getZ()),
-                        Math.max(1, sourceImage.getT()), parentContext);
+                        registrationInput.channel(),
+                        registrationInput.slice(),
+                        registrationInput.frame(), parentContext);
         SwingUtilities.invokeLater(() -> {
             try {
                 final var frame = SwingReviewWindow.open(
                         sourceImage.getTitle(), controller, exportService,
-                        manualRoiExportService, manualRoiSession);
+                        manualRoiExportService, manualRoiSession,
+                        new org.atlasalign.plugin.project.ReviewProjectContext(sourceImage, atlasPath, parentContext,
+                                Optional.empty(), Optional.empty()));
                 org.atlasalign.plugin.batch.BatchReviewNavigation.attach(
                         sourceImage, frame);
             } catch (final RuntimeException error) {
@@ -407,15 +435,6 @@ public final class ReviewAlignmentCommand implements Command {
                 parentSourceName, parentSourcePixelSha256,
                 parentSourceWidth, parentSourceHeight,
                 sectionSourceOffsetX, sectionSourceOffsetY));
-    }
-
-    private void initializeRegistrationChannel() {
-        registrationChannel =
-                registrationChannelDefault(sourceImage);
-    }
-
-    private void sourceImageChanged() {
-        initializeRegistrationChannel();
     }
 
     static int registrationChannelDefault(
@@ -677,11 +696,24 @@ public final class ReviewAlignmentCommand implements Command {
             final Path atlasCache,
             final Optional<DeepSlicePlaneProvider> planeProvider,
             final boolean automaticInferenceRequested) {
+        return prepareReview(source, new RegistrationInput(channel,
+                source.getZ(), source.getT()), maximumDimension, initialLevel,
+                atlasCache, planeProvider, automaticInferenceRequested);
+    }
+
+    static ReviewLaunch prepareReview(
+            final ImagePlus source,
+            final RegistrationInput registrationInput,
+            final int maximumDimension,
+            final int initialLevel,
+            final Path atlasCache,
+            final Optional<DeepSlicePlaneProvider> planeProvider,
+            final boolean automaticInferenceRequested) {
         final ImagePlusSourceImage readOnly =
                 new ImagePlusSourceImage(source);
         final SafePreviewResult safe =
                 new SafeImageIntakeService().preparePreview(
-                        readOnly, channel, maximumDimension);
+                        readOnly, registrationInput, maximumDimension);
         final RegistrationPreview preview = safe.preview();
         final TissueSegmentationResult segmentation =
                 new TissueSegmenter().segment(
@@ -990,7 +1022,7 @@ public final class ReviewAlignmentCommand implements Command {
                 plane.width(), plane.height(), tissue);
     }
 
-    static AtlasReviewProvenance provenance(
+    public static AtlasReviewProvenance provenance(
             final VerifiedAtlas atlas) {
         return new AtlasReviewProvenance(
                 atlas.manifest().atlasId(),

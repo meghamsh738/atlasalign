@@ -18,6 +18,7 @@ public final class AlignmentReviewSession {
             new ArrayList<>();
     private final List<ReviewAuditEvent> auditTrail =
             new ArrayList<>();
+    private List<ReviewAuditSummary> priorAuditHistory = List.of();
     private int cursor;
     private long contentRevision;
     private long auditSequence;
@@ -64,6 +65,44 @@ public final class AlignmentReviewSession {
                     proposalContent, initialContent);
         }
     }
+
+    /** Restores stored geometry directly; prior acceptance never authorizes a reopened review. */
+    public static AlignmentReviewSession restore(final AlignmentReviewCheckpoint saved,
+            final ReviewAcceptanceVerification currentIdentities) {
+        Objects.requireNonNull(saved, "saved");
+        Objects.requireNonNull(currentIdentities, "currentIdentities");
+        if (!saved.basis().sourceSnapshot().equals(currentIdentities.currentSourceSnapshot())) {
+            throw new SourceVerificationException("Saved project source pixels or metadata do not match");
+        }
+        if (!saved.basis().atlas().equals(currentIdentities.currentAtlas())) {
+            throw new IllegalArgumentException("Saved project atlas identity does not match the verified cache");
+        }
+        return new AlignmentReviewSession(saved);
+    }
+
+    private AlignmentReviewSession(final AlignmentReviewCheckpoint saved) {
+        basis = saved.basis();
+        confidenceEvaluator = new ReviewConfidenceEvaluator();
+        initialContent = saved.initialContent();
+        adjustedInitialPlacement = saved.adjustedInitialPlacement();
+        timeline.add(saved.content());
+        contentRevision = saved.contentRevision();
+        priorAuditHistory = saved.auditHistory();
+        auditSequence = priorAuditHistory.isEmpty() ? 0
+                : priorAuditHistory.get(priorAuditHistory.size() - 1).sequence();
+        audit(ReviewOperation.REOPEN_PROJECT,
+                "Reopen exact saved geometry; renewed atlas acceptance is required",
+                saved.content(), saved.content());
+    }
+
+    public synchronized AlignmentReviewCheckpoint checkpoint() {
+        final List<ReviewAuditSummary> history = new ArrayList<>(priorAuditHistory);
+        auditTrail.stream().map(ReviewAuditSummary::from).forEach(history::add);
+        return new AlignmentReviewCheckpoint(basis, initialContent, timeline.get(cursor),
+                adjustedInitialPlacement, contentRevision, history);
+    }
+
+    public List<ReviewAuditSummary> priorAuditHistory() { return priorAuditHistory; }
 
     public synchronized AlignmentReviewState state() {
         return new AlignmentReviewState(

@@ -35,6 +35,9 @@ class ManualRoiFootprintTest {
         assertFalse(footprint.containsSourcePixel(4, 4));
         assertFalse(footprint.containsSourcePixel(0, 0));
         assertEquals(27, footprint.pixelCount());
+        for (int y = -1; y <= 8; y++) for (int x = -1; x <= 9; x++) {
+            assertEquals(footprint.containsSourcePixel(x, y), ManualRoiFootprint.containsSourcePixel(roi, x, y, 9, 8));
+        }
     }
 
     @Test
@@ -57,6 +60,9 @@ class ManualRoiFootprintTest {
         assertTrue(footprint.containsSourcePixel(1, 1));
         assertTrue(footprint.containsSourcePixel(6, 5));
         assertFalse(footprint.containsSourcePixel(4, 3));
+        for (int y = 0; y < 7; y++) for (int x = 0; x < 8; x++) {
+            assertEquals(footprint.containsSourcePixel(x, y), ManualRoiFootprint.containsSourcePixel(roi, x, y, 8, 7));
+        }
     }
 
     private static ReviewerRoiPart part(final String id,

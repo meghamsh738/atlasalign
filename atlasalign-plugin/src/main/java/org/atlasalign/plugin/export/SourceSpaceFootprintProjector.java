@@ -19,6 +19,36 @@ import org.atlasalign.core.Point2D;
  */
 public final class SourceSpaceFootprintProjector {
 
+    @FunctionalInterface public interface PixelMembership { boolean contains(int sourceX, int sourceY); }
+
+    /** Read-only sampled counterpart of native export, retaining its nearest-label and clipping rules. */
+    public PixelMembership membership(final AcceptedAlignmentSnapshot snapshot, final AtlasCoronalPlane plane,
+            final List<ExportRegionSelection> selections) {
+        requireAcceptedPlane(snapshot, plane);
+        final List<ExportRegionSelection> requested = List.copyOf(selections);
+        final int[] labels = plane.annotationId();
+        final var mapping = snapshot.previewMapping();
+        final var support = snapshot.tissueClippingEnabled() ? snapshot.reviewedTissueSupport().orElseThrow() : null;
+        return (x, y) -> {
+            if (x < 0 || y < 0 || x >= mapping.sourceWidth() || y >= mapping.sourceHeight()) return false;
+            final Point2D point = mapping.sourceToPreview(new Point2D(x, y));
+            if (support != null && (point.x() < 0 || point.x() > mapping.previewWidth() - 1.0
+                    || support.horizontalIntervals(point.y()).stream().noneMatch(interval ->
+                            point.x() >= interval.minimumXInclusive() && point.x() < interval.maximumXExclusive()))) return false;
+            final List<Point2D> candidates;
+            try { candidates = snapshot.mapPreviewToAtlasCandidates(point); }
+            catch (IllegalArgumentException outside) { return false; }
+            for (final Point2D atlas : candidates) {
+                if (!snapshot.includesAtlasPoint(atlas)) continue;
+                final int ax = (int) Math.round(atlas.x()), ay = (int) Math.round(atlas.y());
+                if (ax < 0 || ay < 0 || ax >= plane.width() || ay >= plane.height()) continue;
+                final int id = labels[ay * plane.width() + ax];
+                if (id != 0 && requested.stream().anyMatch(selection -> selection.contains(id))) return true;
+            }
+            return false;
+        };
+    }
+
     public List<SourceRegionFootprint> project(
             final AcceptedAlignmentSnapshot accepted,
             final AtlasCoronalPlane annotationPlane,

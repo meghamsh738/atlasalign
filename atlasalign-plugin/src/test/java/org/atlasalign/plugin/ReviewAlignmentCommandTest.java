@@ -1,6 +1,7 @@
 package org.atlasalign.plugin;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -9,6 +10,7 @@ import java.lang.reflect.Proxy;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -30,13 +32,17 @@ import org.atlasalign.application.InitialPlaneSource;
 import org.atlasalign.application.InitialPlaneProposal;
 import org.atlasalign.application.SectionGeometry;
 import org.atlasalign.core.BinaryMask;
+import org.atlasalign.io.imagej.ImagePlusSourceImage;
 import org.atlasalign.plugin.review.AtlasPlaneRequest;
 import org.atlasalign.plugin.review.AtlasPlaneSource;
 import org.junit.jupiter.api.Test;
 import org.scijava.command.Command;
+import org.scijava.command.CommandInfo;
+import org.scijava.command.CommandModule;
 import org.scijava.log.LogService;
 import org.scijava.plugin.Plugin;
 import org.scijava.plugin.Parameter;
+import org.scijava.module.process.InitPreprocessor;
 
 class ReviewAlignmentCommandTest {
 
@@ -69,6 +75,8 @@ class ReviewAlignmentCommandTest {
             throws NoSuchFieldException {
         for (final String field : new String[] {
                 "registrationChannel",
+                "registrationSlice",
+                "registrationFrame",
                 "useLocalDeepSlice",
                 "deepSliceRuntimeDirectory",
                 "deepSliceWorkDirectory",
@@ -82,8 +90,7 @@ class ReviewAlignmentCommandTest {
     }
 
     @Test
-    void registrationChannelDefaultsToCurrentSourceChannel()
-            throws NoSuchFieldException {
+    void intakeRegistrationChannelDefaultReadsCurrentSourceChannel() {
         final ImageStack stack = new ImageStack(2, 2);
         stack.addSlice(new ByteProcessor(2, 2));
         stack.addSlice(new ByteProcessor(2, 2));
@@ -100,20 +107,79 @@ class ReviewAlignmentCommandTest {
                 ReviewAlignmentCommand
                         .registrationChannelDefault(null));
 
-        final Parameter sourceParameter =
-                ReviewAlignmentCommand.class
-                        .getDeclaredField("sourceImage")
-                        .getAnnotation(Parameter.class);
-        final Parameter channelParameter =
-                ReviewAlignmentCommand.class
-                        .getDeclaredField("registrationChannel")
-                        .getAnnotation(Parameter.class);
-        assertEquals(
-                "sourceImageChanged",
-                sourceParameter.callback());
-        assertEquals(
-                "initializeRegistrationChannel",
-                channelParameter.initializer());
+    }
+
+    @Test
+    void resolvedRegistrationScopeSurvivesRealSciJavaInitialization() throws Exception {
+        // Reproduces commands.run(..., true, inputs): explicit inputs are set and
+        // resolved before InitPreprocessor invokes the command's initializers.
+        for (final int requestedChannel : new int[] {2, 1}) {
+            final ImagePlus source = scopedSource(3 - requestedChannel);
+            final var before = new ImagePlusSourceImage(source).snapshot();
+            final int activeChannel = source.getC(), activeSlice = source.getZ(), activeFrame = source.getT();
+            final double displayMinimum = source.getDisplayRangeMin(), displayMaximum = source.getDisplayRangeMax();
+            final CommandModule module = initializedCommand(Map.of(
+                    "sourceImage", source,
+                    "registrationChannel", requestedChannel,
+                    "registrationSlice", 2,
+                    "registrationFrame", 1));
+
+            assertEquals(requestedChannel, module.getInput("registrationChannel"),
+                    "A resolved registration channel must not be replaced by the source's active display channel");
+            assertEquals(2, module.getInput("registrationSlice"));
+            assertEquals(1, module.getInput("registrationFrame"));
+            for (final String name : List.of("sourceImage", "registrationChannel", "registrationSlice", "registrationFrame")) {
+                assertTrue(module.isInputResolved(name), name);
+            }
+            // A source widget callback must not silently reset an explicit scope either.
+            module.getInfo().getInput("sourceImage").callback(module);
+            assertEquals(requestedChannel, module.getInput("registrationChannel"));
+            assertEquals(before, new ImagePlusSourceImage(source).snapshot());
+            assertEquals(activeChannel, source.getC());
+            assertEquals(activeSlice, source.getZ());
+            assertEquals(activeFrame, source.getT());
+            assertEquals(displayMinimum, source.getDisplayRangeMin());
+            assertEquals(displayMaximum, source.getDisplayRangeMax());
+        }
+    }
+
+    @Test
+    void workerCompatibilityDefaultsRemainOneWhileIntakeUsesCurrentChannel() throws Exception {
+        final ImagePlus source = scopedSource(2);
+        final var before = new ImagePlusSourceImage(source).snapshot();
+        assertEquals(2, ReviewAlignmentCommand.registrationChannelDefault(source));
+        final CommandModule module = initializedCommand(Map.of("sourceImage", source));
+        assertEquals(1, module.getInput("registrationChannel"));
+        assertEquals(1, module.getInput("registrationSlice"));
+        assertEquals(1, module.getInput("registrationFrame"));
+        assertEquals(before, new ImagePlusSourceImage(source).snapshot());
+        assertEquals(2, source.getC());
+        assertEquals(1, source.getZ());
+        assertEquals(2, source.getT());
+    }
+
+    private static CommandModule initializedCommand(final Map<String, Object> inputs) throws Exception {
+        final CommandModule module = new CommandModule(new CommandInfo(ReviewAlignmentCommand.class));
+        inputs.forEach((name, value) -> { module.setInput(name, value); module.resolveInput(name); });
+        final InitPreprocessor initializer = new InitPreprocessor();
+        initializer.process(module);
+        assertFalse(initializer.isCanceled(), initializer.getCancelReason());
+        return module;
+    }
+
+    private static ImagePlus scopedSource(final int activeChannel) {
+        final ImageStack stack = new ImageStack(2, 2);
+        for (int index = 0; index < 8; index++) {
+            stack.addSlice("source-plane-" + index,
+                    new ByteProcessor(2, 2, new byte[] {(byte) index, (byte) (index + 20), (byte) (index + 40), (byte) (index + 60)}, null));
+        }
+        final ImagePlus source = new ImagePlus("scoped-source", stack);
+        source.setDimensions(2, 2, 2);
+        source.setPosition(activeChannel, 1, 2);
+        source.getCalibration().pixelWidth = .625;
+        source.getCalibration().pixelHeight = .875;
+        source.setDisplayRange(12, 192);
+        return source;
     }
 
     @Test

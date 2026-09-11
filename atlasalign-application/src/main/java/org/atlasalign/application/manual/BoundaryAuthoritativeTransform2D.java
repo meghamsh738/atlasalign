@@ -39,6 +39,11 @@ public final class BoundaryAuthoritativeTransform2D
             "top-left-pixel-center-is-(0,0)";
     public static final double MAXIMUM_BOUNDARY_ERROR_PIXELS = 0.25;
 
+    public static final int SNAPSHOT_FORMAT_VERSION = 1;
+    /** Import bounds limit allocation before indexes and scientific audits run. */
+    public static final int MAXIMUM_SNAPSHOT_BOUNDARY_VERTICES = 8_192;
+    public static final int MAXIMUM_SNAPSHOT_TRIANGLES = 250_000;
+
     private static final double PARAMETER_EPSILON = 1e-13;
     private static final double GEOMETRY_RELATIVE_EPSILON = 1e-12;
     private static final double POINT_LOCATION_RELATIVE_EPSILON = 1e-10;
@@ -57,6 +62,144 @@ public final class BoundaryAuthoritativeTransform2D
     private final TriangleSpatialIndex sourceTriangleIndex;
     private final TriangleSpatialIndex targetTriangleIndex;
     private volatile MidlineGeometry cachedMidlineGeometry;
+
+    /** Exact solved geometry; lists and their value records are immutable. */
+    public record Snapshot(
+            int formatVersion,
+            List<MonotoneBoundary2D.Vertex> atlasInputVertices,
+            List<MonotoneBoundary2D.Vertex> tissueInputVertices,
+            List<Double> commonBoundaryParameters,
+            List<Point2D> atlasBoundary,
+            List<Point2D> tissueBoundary,
+            List<MeshTriangle> triangles,
+            Diagnostics diagnostics) {
+        public Snapshot {
+            if (formatVersion != SNAPSHOT_FORMAT_VERSION) {
+                throw new IllegalArgumentException("Unsupported boundary mesh snapshot version");
+            }
+            atlasInputVertices = snapshotList(atlasInputVertices,
+                    3, MAXIMUM_SNAPSHOT_BOUNDARY_VERTICES, "atlasInputVertices");
+            tissueInputVertices = snapshotList(tissueInputVertices,
+                    3, MAXIMUM_SNAPSHOT_BOUNDARY_VERTICES, "tissueInputVertices");
+            commonBoundaryParameters = snapshotList(commonBoundaryParameters,
+                    3, MAXIMUM_SNAPSHOT_BOUNDARY_VERTICES, "commonBoundaryParameters");
+            atlasBoundary = snapshotList(atlasBoundary,
+                    3, MAXIMUM_SNAPSHOT_BOUNDARY_VERTICES, "atlasBoundary");
+            tissueBoundary = snapshotList(tissueBoundary,
+                    3, MAXIMUM_SNAPSHOT_BOUNDARY_VERTICES, "tissueBoundary");
+            triangles = snapshotList(triangles, 1, MAXIMUM_SNAPSHOT_TRIANGLES, "triangles");
+            diagnostics = Objects.requireNonNull(diagnostics, "diagnostics");
+            if (atlasBoundary.size() != commonBoundaryParameters.size()
+                    || tissueBoundary.size() != commonBoundaryParameters.size()
+                    || diagnostics.commonBoundaryVertexCount() != commonBoundaryParameters.size()
+                    || diagnostics.commonRefinedTriangleCount() != triangles.size()
+                    || diagnostics.atlasCanonicalTriangleCount() > commonBoundaryParameters.size() - 2
+                    || diagnostics.tissueCanonicalTriangleCount() > commonBoundaryParameters.size() - 2
+                    || !ALGORITHM_REVISION.equals(diagnostics.algorithmRevision())
+                    || !PIXEL_CENTER_CONVENTION.equals(diagnostics.pixelCenterConvention())
+                    || !diagnostics.contentSha256().matches("[0-9a-f]{64}")) {
+                throw new IllegalArgumentException("Boundary mesh snapshot metadata is inconsistent");
+            }
+            double previous = -1;
+            for (final double parameter : commonBoundaryParameters) {
+                if (!Double.isFinite(parameter) || parameter < 0 || parameter >= 1
+                        || parameter <= previous) {
+                    throw new IllegalArgumentException("Boundary parameters must increase within [0, 1)");
+                }
+                previous = parameter;
+            }
+            if (commonBoundaryParameters.get(0) != 0.0) {
+                throw new IllegalArgumentException("Boundary parameters must start at zero");
+            }
+            final java.util.Set<Integer> sourceCanonical = new java.util.HashSet<>();
+            final java.util.Set<Integer> targetCanonical = new java.util.HashSet<>();
+            for (int index = 0; index < triangles.size(); index++) {
+                final MeshTriangle triangle = triangles.get(index);
+                sourceCanonical.add(triangle.sourceCanonicalTriangleIndex());
+                targetCanonical.add(triangle.targetCanonicalTriangleIndex());
+                if (triangle.id() != index
+                        || triangle.sourceCanonicalTriangleIndex() >= diagnostics.atlasCanonicalTriangleCount()
+                        || triangle.targetCanonicalTriangleIndex() >= diagnostics.tissueCanonicalTriangleCount()) {
+                    throw new IllegalArgumentException("Boundary mesh triangle indices are inconsistent");
+                }
+            }
+            if (sourceCanonical.size() != diagnostics.atlasCanonicalTriangleCount()
+                    || targetCanonical.size() != diagnostics.tissueCanonicalTriangleCount()) {
+                throw new IllegalArgumentException("Saved boundary mesh is missing canonical triangle cells");
+            }
+        }
+    }
+
+    public Snapshot snapshot() {
+        return new Snapshot(SNAPSHOT_FORMAT_VERSION, atlasInputBoundary.vertices(),
+                tissueInputBoundary.vertices(), commonBoundaryParameters, atlasBoundary,
+                tissueBoundary, triangles, diagnostics);
+    }
+
+    /** Restores saved affine patches directly; no triangulation or fitting occurs. */
+    public static BoundaryAuthoritativeTransform2D restore(final Snapshot snapshot) {
+        final Snapshot saved = Objects.requireNonNull(snapshot, "snapshot");
+        final MonotoneBoundary2D atlasInput = new MonotoneBoundary2D(saved.atlasInputVertices());
+        final MonotoneBoundary2D tissueInput = new MonotoneBoundary2D(saved.tissueInputVertices());
+        validateSimpleBoundary(atlasInput, "saved atlas boundary");
+        validateSimpleBoundary(tissueInput, "saved tissue boundary");
+        final double atlasArea = signedArea(points(atlasInput));
+        final double tissueArea = signedArea(points(tissueInput));
+        if (Math.signum(atlasArea) != Math.signum(tissueArea)) {
+            throw new IllegalArgumentException("Saved boundary traversal orientations must agree");
+        }
+        // Check recorded boundary correspondence against its immutable inputs.
+        // These derived values are used only for validation, never for restore.
+        if (!commonParameters(atlasInput, tissueInput).equals(saved.commonBoundaryParameters())) {
+            throw new IllegalArgumentException("Saved common boundary parameters do not match their inputs");
+        }
+        final List<Point2D> expectedAtlas = refine(atlasInput, saved.commonBoundaryParameters());
+        final List<Point2D> expectedTissue = refine(tissueInput, saved.commonBoundaryParameters());
+        if (!(atlasArea < 0 ? reverseKeepingFirst(expectedAtlas) : expectedAtlas).equals(saved.atlasBoundary())
+                || !(atlasArea < 0 ? reverseKeepingFirst(expectedTissue) : expectedTissue).equals(saved.tissueBoundary())) {
+            throw new IllegalArgumentException("Saved refined boundaries do not match their input vertices");
+        }
+        for (final MeshTriangle triangle : saved.triangles()) {
+            for (final Triangle2D geometry : List.of(triangle.canonical(), triangle.source(), triangle.target())) {
+                if (robustOrientation(geometry.a(), geometry.b(), geometry.c()) <= 0
+                        || !Double.isFinite(geometry.signedDoubleArea())) {
+                    throw new IllegalArgumentException("Saved boundary mesh triangles must have finite positive area");
+                }
+            }
+        }
+        final Diagnostics recorded = saved.diagnostics();
+        final String hash = contentHash(atlasInput, tissueInput, saved.commonBoundaryParameters(),
+                saved.atlasBoundary(), saved.tissueBoundary(), saved.triangles(),
+                recorded.previewWidth(), recorded.previewHeight());
+        if (!hash.equals(recorded.contentSha256())) {
+            throw new IllegalArgumentException("Saved boundary mesh content hash does not match");
+        }
+        final BoundaryAuthoritativeTransform2D restored = new BoundaryAuthoritativeTransform2D(
+                atlasInput, tissueInput, saved.commonBoundaryParameters(), saved.atlasBoundary(),
+                saved.tissueBoundary(), saved.triangles(), recorded);
+        final double diagonal = Math.hypot(recorded.previewWidth(), recorded.previewHeight());
+        final Audit audit = restored.audit(diagonal,
+                GEOMETRY_RELATIVE_EPSILON * Math.max(1.0, diagonal * diagonal));
+        final Diagnostics audited = new Diagnostics(ALGORITHM_REVISION, PIXEL_CENTER_CONVENTION,
+                recorded.previewWidth(), recorded.previewHeight(), saved.commonBoundaryParameters().size(),
+                recorded.atlasCanonicalTriangleCount(), recorded.tissueCanonicalTriangleCount(),
+                saved.triangles().size(), audit.maximumBoundaryError(), audit.minimumSourceDoubleArea(),
+                audit.minimumTargetDoubleArea(), audit.sourceMeshArea(), audit.atlasPolygonArea(),
+                audit.targetMeshArea(), audit.tissuePolygonArea(), hash);
+        if (!audited.equals(recorded)) {
+            throw new IllegalArgumentException("Saved boundary diagnostics do not match the audited mesh");
+        }
+        return restored;
+    }
+
+    private static <T> List<T> snapshotList(final List<T> values,
+            final int minimum, final int maximum, final String name) {
+        Objects.requireNonNull(values, name);
+        if (values.size() < minimum || values.size() > maximum) {
+            throw new IllegalArgumentException("Saved " + name + " count is out of bounds");
+        }
+        return List.copyOf(values);
+    }
 
     private BoundaryAuthoritativeTransform2D(
             final MonotoneBoundary2D atlasInputBoundary,

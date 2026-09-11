@@ -13,6 +13,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import org.atlasalign.application.AcceptedAlignmentSnapshot;
 import org.atlasalign.application.HalfAtlasCoverage;
 import org.atlasalign.application.ReviewedTissueSupport;
+import org.atlasalign.atlas.AtlasCoronalPlane;
 import org.atlasalign.core.BinaryMask;
 import org.atlasalign.core.Point2D;
 import org.atlasalign.core.PreviewMapping;
@@ -22,6 +23,57 @@ class SourceSpaceFootprintProjectorTest {
 
     private final SourceSpaceFootprintProjector projector =
             new SourceSpaceFootprintProjector();
+
+    @Test
+    void sampledMembershipMatchesNativeFootprintsForFullHalfAndOverlappingDisjoinedSelections() {
+        final var source = ExportTestFixtures.sourceSnapshot(8, 1, 1, 1);
+        final var left = ExportTestFixtures.region(1, "LEFT");
+        final var right = ExportTestFixtures.region(2, "RIGHT");
+        assertMembershipMatchesFootprints(ExportTestFixtures.accepted(source, Optional.empty(), false),
+                ExportTestFixtures.annotationPlane(), List.of(left, right));
+        assertMembershipMatchesFootprints(ExportTestFixtures.acceptedHalfWithJoinedPlacement(source),
+                ExportTestFixtures.annotationPlane(), List.of(left));
+        assertMembershipMatchesFootprints(ExportTestFixtures.acceptedDisjoinedOverlap(source),
+                ExportTestFixtures.overlappingDisjoinedAnnotationPlane(), List.of(left, right));
+        final var clippedDisjoined = withMappingAndSupport(ExportTestFixtures.acceptedDisjoinedOverlap(source),
+                new PreviewMapping(8, 6, 8, 6), ExportTestFixtures.leftSupport());
+        assertMembershipMatchesFootprints(clippedDisjoined,
+                ExportTestFixtures.overlappingDisjoinedAnnotationPlane(), List.of(left, right));
+    }
+
+    @Test
+    void sampledMembershipMatchesNativeClippingAtFractionalCentersHolesAndPreviewEdges() {
+        final var source = ExportTestFixtures.sourceSnapshot(137, 103, 8, 1, 1, 1);
+        final var mapping = new PreviewMapping(137, 103, 64, 48);
+        final boolean[] withHole = new boolean[64 * 48];
+        java.util.Arrays.fill(withHole, true);
+        for (int y = 16; y <= 26; y++) for (int x = 20; x <= 37; x++) withHole[y * 64 + x] = false;
+        for (final var support : List.of(fractionalSupport(64, 48), multiComponentSupport(64, 48),
+                ReviewedTissueSupport.fromMask(BinaryMask.fromBooleans(64, 48, withHole)))) {
+            final var accepted = withMappingAndSupport(ExportTestFixtures.accepted(source, Optional.empty(), false),
+                    mapping, support);
+            assertMembershipMatchesFootprints(accepted, ExportTestFixtures.filledAnnotationPlane(1),
+                    List.of(ExportTestFixtures.region(1, "ALL")));
+        }
+    }
+
+    @Test
+    void sampledMembershipFreezesRequestedRegionsAndDoesNotChangeAtlasLabels() {
+        final var source = ExportTestFixtures.sourceSnapshot(8, 1, 1, 1);
+        final var accepted = ExportTestFixtures.accepted(source, Optional.empty(), false);
+        final var plane = ExportTestFixtures.annotationPlane();
+        final int[] before = plane.annotationId();
+        final var requested = new ArrayList<>(List.of(ExportTestFixtures.region(1, "LEFT")));
+        final var membership = projector.membership(accepted, plane, requested);
+        requested.clear();
+        assertTrue(membership.contains(3, 5));
+        assertFalse(membership.contains(4, 5));
+        assertFalse(membership.contains(-1, 0));
+        assertFalse(membership.contains(0, -1));
+        assertFalse(membership.contains(8, 0));
+        assertFalse(membership.contains(0, 6));
+        org.junit.jupiter.api.Assertions.assertArrayEquals(before, plane.annotationId());
+    }
 
     @Test
     void mapsNearestNeighbourLabelsIntoTightSourceBounds() {
@@ -387,6 +439,28 @@ class SourceSpaceFootprintProjectorTest {
         return support.moveControl(control.id(), new Point2D(
                 control.point().x() + 2.375,
                 control.point().y() + 1.625));
+    }
+
+    private void assertMembershipMatchesFootprints(final AcceptedAlignmentSnapshot accepted,
+            final AtlasCoronalPlane plane, final List<ExportRegionSelection> selections) {
+        final var footprints = projector.project(accepted, plane, selections, () -> false, ignored -> { });
+        final var union = projector.union(footprints);
+        final var sampledUnion = projector.membership(accepted, plane, selections);
+        final var members = selections.stream().map(selection -> projector.membership(accepted, plane, List.of(selection))).toList();
+        int count = 0;
+        for (int y = -1; y <= accepted.previewMapping().sourceHeight(); y++) {
+            for (int x = -1; x <= accepted.previewMapping().sourceWidth(); x++) {
+                for (int region = 0; region < footprints.size(); region++) {
+                    assertEquals(footprints.get(region).containsSourcePixel(x, y), members.get(region).contains(x, y),
+                            "Region " + region + " at source pixel " + x + "," + y);
+                }
+                final boolean included = sampledUnion.contains(x, y);
+                assertEquals(union.containsSourcePixel(x, y), included, "Union at source pixel " + x + "," + y);
+                if (included) count++;
+            }
+        }
+        assertTrue(count > 0, "The comparison must exercise an actual export footprint");
+        assertEquals(union.pixelCount(), count);
     }
 
     private static ReviewedTissueSupport rectangularSupport(

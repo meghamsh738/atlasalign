@@ -12,6 +12,7 @@ import java.util.List;
 import java.util.Objects;
 import org.atlasalign.application.ReadOnlySourceImage;
 import org.atlasalign.application.RegistrationPreview;
+import org.atlasalign.application.RegistrationInput;
 import org.atlasalign.core.CalibrationMetadata;
 import org.atlasalign.core.Point2D;
 import org.atlasalign.core.PreviewMapping;
@@ -43,15 +44,21 @@ public final class ImagePlusSourceImage implements ReadOnlySourceImage {
     public RegistrationPreview createPreview(
             final int oneBasedChannel,
             final int maximumDimension) {
+        return createPreview(new RegistrationInput(oneBasedChannel,
+                source.getZ(), source.getT()), maximumDimension);
+    }
+
+    @Override
+    public RegistrationPreview createPreview(final RegistrationInput input,
+            final int maximumDimension) {
         if (source.getBitDepth() == 24) {
             throw new IllegalArgumentException(
                     "Packed RGB images are not a defined registration channel; split RGB channels first");
         }
-        if (oneBasedChannel < 1 || oneBasedChannel > source.getNChannels()) {
-            throw new IllegalArgumentException("Channel is outside the source image");
-        }
-        final int sourceSlice = source.getZ();
-        final int sourceFrame = source.getT();
+        input.validateAgainst(readMetadata());
+        final int oneBasedChannel = input.channel();
+        final int sourceSlice = input.slice();
+        final int sourceFrame = input.frame();
         final int stackIndex =
                 source.getStackIndex(oneBasedChannel, sourceSlice, sourceFrame);
         final ImageProcessor processor = source.getStack().getProcessor(stackIndex);

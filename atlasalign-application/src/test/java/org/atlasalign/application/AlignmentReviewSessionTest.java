@@ -18,6 +18,28 @@ class AlignmentReviewSessionTest {
     private static final double TOLERANCE = 1e-9;
 
     @Test
+    void checkpointRestoresExactContentAndAuditWithFreshAcceptanceAndUndoHistory() {
+        final var basis = ReviewTestFixtures.basis(SectionGeometry.FULL);
+        final var original = AlignmentReviewSession.forNewReview(basis);
+        original.apply(new ReviewEdit.Translate(3, 2));
+        original.accept(ReviewTestFixtures.verifier(basis), true);
+        final var saved = original.checkpoint();
+        final var restored = AlignmentReviewSession.restore(saved,
+                new ReviewAcceptanceVerification(basis.sourceSnapshot(), basis.atlas()));
+        assertEquals(original.state().content(), restored.state().content());
+        assertEquals(original.state().contentRevision(), restored.state().contentRevision());
+        assertEquals(original.initialContent(), restored.initialContent());
+        assertFalse(restored.canUndo());
+        assertFalse(restored.canRedo());
+        assertTrue(restored.acceptedAlignment().isEmpty());
+        assertTrue(restored.priorAuditHistory().stream().anyMatch(event ->
+                event.acceptanceAudit().filter(ReviewAcceptanceAudit::succeeded).isPresent()));
+        restored.apply(new ReviewEdit.Translate(1, 0));
+        assertTrue(restored.undo());
+        assertEquals(saved.content(), restored.state().content());
+    }
+
+    @Test
     void newManualReviewStartsUprightAndResetRetainsThatStart() {
         final AffineTransform2D baseline = atlasToPreview(0.9, -0.3, 5, 0.2, 1.1, 7);
         final AlignmentReviewBasis basis = basisWithAffine(SectionGeometry.FULL, baseline);

@@ -125,6 +125,22 @@ public final class ManualRoiFootprint {
         }
     }
 
+    /** The same ADD-minus-SUBTRACT rule for bounded display sampling without allocating a full-image mask. */
+    public static boolean containsSourcePixel(final ReviewerRoi roi, final int x, final int y,
+            final int sourceWidth, final int sourceHeight) {
+        if (!roi.finished()) throw new IllegalArgumentException("Finish every polygon part before previewing an export");
+        if (x < 0 || y < 0 || x >= sourceWidth || y >= sourceHeight) return false;
+        boolean included = false;
+        for (final var part : roi.parts()) {
+            if (part.operation() == RoiPartOperation.ADD && contains(part.vertices(), x, y)) { included = true; break; }
+        }
+        if (!included) return false;
+        for (final var part : roi.parts()) {
+            if (part.operation() == RoiPartOperation.SUBTRACT && contains(part.vertices(), x, y)) return false;
+        }
+        return true;
+    }
+
     /** Even-odd containment with polygon edges included deterministically. */
     static boolean contains(
             final List<ReviewerRoiVertex> vertices,

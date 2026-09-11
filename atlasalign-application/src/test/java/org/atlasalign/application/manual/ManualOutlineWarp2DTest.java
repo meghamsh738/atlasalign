@@ -18,6 +18,25 @@ class ManualOutlineWarp2DTest {
     private static final int HEIGHT = 400;
 
     @Test
+    void storedOutlineRestoresExactMappingAndRejectsModifiedWeights() {
+        final var warp = ManualOutlineWarp2D.fit(squareLoop(), squareLoop().stream()
+                .map(ManualOutlineWarp2DTest::smoothStretch).toList(), anchors(), WIDTH, HEIGHT);
+        final var restored = ManualOutlineWarp2D.restore(warp.snapshot());
+        assertEquals(warp, restored);
+        for (int y = 40; y < 350; y += 43) for (int x = 40; x < 350; x += 37) {
+            final var point = new Point2D(x + .25, y + .75);
+            assertEquals(warp.apply(point), restored.apply(point));
+            assertEquals(warp.inverse(point), restored.inverse(point));
+        }
+        final var value = warp.snapshot();
+        final var weights = new ArrayList<>(value.xWeights()); weights.set(0, weights.get(0) + .1);
+        assertThrows(IllegalArgumentException.class, () -> ManualOutlineWarp2D.restore(
+                new ManualOutlineWarp2D.Snapshot(value.atlasLoop(), value.tissueLoop(), value.anchors(),
+                        value.sourceControlPoints(), value.targetControlPoints(), weights, value.yWeights(),
+                        value.supportRadius(), value.diagnostics())));
+    }
+
+    @Test
     void identityIsDeterministicImmutableAndReversible() {
         final List<Point2D> mutableAtlas = new ArrayList<>(squareLoop());
         final List<Point2D> mutableTissue = new ArrayList<>(squareLoop());

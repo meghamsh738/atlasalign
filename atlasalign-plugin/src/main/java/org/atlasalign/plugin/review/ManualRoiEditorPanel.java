@@ -93,7 +93,7 @@ final class ManualRoiEditorPanel extends JPanel {
             new JComboBox<>(POINT_COUNT_CHOICES);
     private final JLabel selectedVertexCount = new JLabel(
             "Select an ROI to edit its points");
-    private final JButton applyVertexCount = new JButton("Apply count");
+    private final JButton applyVertexCount = new JButton("Simplify outline");
     private final JCheckBox visible = new JCheckBox("Visible", true);
     private final JCheckBox selectedForExport = new JCheckBox(
             "Include in export", true);
@@ -110,10 +110,13 @@ final class ManualRoiEditorPanel extends JPanel {
     private final JButton undo = new JButton("ROI Undo");
     private final JButton redo = new JButton("ROI Redo");
     private final JButton export = new JButton("Export selected ROIs…");
+    private ReviewController imageScopeController;
     private ReviewViewModel model;
     private boolean updating;
     private boolean selectingList;
     private boolean active;
+    private boolean displayGeometryBlocked;
+    private boolean exportRunning;
 
     ManualRoiEditorPanel(
             final ReviewerRoiSession session,
@@ -143,15 +146,32 @@ final class ManualRoiEditorPanel extends JPanel {
         refresh();
     }
 
+    void setImageScopeController(final ReviewController controller) {
+        imageScopeController = Objects.requireNonNull(controller, "controller");
+        controller.bindRoiSnapshots(session::snapshot);
+    }
+
     ReviewerRoiSession session() {
         return session;
     }
 
     private Runnable refreshCompactReview = () -> {};
 
+    void setDisplayGeometryBlocked(final boolean blocked) {
+        displayGeometryBlocked = blocked;
+        refreshExportReadiness();
+    }
+
+    boolean exportReady() {
+        return !displayGeometryBlocked && !exportRunning
+                && exportService.isPresent()
+                && !session.snapshot().exportableRois().isEmpty();
+    }
+
+    boolean exportRunning() { return exportRunning; }
+
     void refreshExportReadiness() {
-        export.setEnabled(exportService.isPresent()
-                && !session.snapshot().exportableRois().isEmpty());
+        export.setEnabled(exportReady());
         refreshCompactReview.run();
     }
 
@@ -183,8 +203,8 @@ final class ManualRoiEditorPanel extends JPanel {
                     ? "No finished ROIs selected. Use Draw ROIs to create or import anatomical outlines. Section markers only define the crop."
                     : count + " finished ROI(s) selected for exact export");
             edit.setText(snapshot.rois().isEmpty() ? "Draw ROIs" : "Edit drawn ROIs");
-            exportButton.setEnabled(count > 0 && exportService.isPresent());
-            advanced.setEnabled(exportService.isPresent());
+            exportButton.setEnabled(exportReady());
+            advanced.setEnabled(!displayGeometryBlocked && !exportRunning && exportService.isPresent());
         };
         refreshCompactReview = refreshSummary;
         session.addListener(refreshSummary);
@@ -218,6 +238,7 @@ final class ManualRoiEditorPanel extends JPanel {
     }
 
     void exportSelected(final Component owner) {
+        if (displayGeometryBlocked || exportRunning) return;
         if (exportService.isEmpty()) {
             showError(owner, "Export unavailable",
                     "This test panel was opened without the original-source export service.");
@@ -235,15 +256,51 @@ final class ManualRoiEditorPanel extends JPanel {
         if (chooser.showSaveDialog(owner) != JFileChooser.APPROVE_OPTION) {
             return;
         }
-        export.setEnabled(false);
-        status.setText("Exporting untouched source pixels…");
         final Path folder = chooser.getSelectedFile().toPath();
+        final var service = exportService.orElseThrow();
+        final var initialSelection = imageScopeController == null
+                ? org.atlasalign.application.export.ExportSelection.allChannels(service.verifiedSource().metadata(),
+                        service.registrationInput().slice(), service.registrationInput().frame())
+                : imageScopeController.exportSelection();
+        final ExportSelectionPanel scope = new ExportSelectionPanel(service.verifiedSource().metadata(), initialSelection);
+        final JPanel confirmation = new JPanel(new BorderLayout(0, 8));
+        confirmation.add(new JLabel("<html>ROIs: " + snapshot.exportableRois().stream()
+                .map(ReviewerRoi::name).map(ManualRoiEditorPanel::escapeHtml)
+                .collect(java.util.stream.Collectors.joining(", "))
+                + "<br>Folder: " + escapeHtml(folder.toString())
+                + "<br>Zero-filled masked images still require the mask for quantitative measurements.</html>"), BorderLayout.NORTH);
+        confirmation.add(scope, BorderLayout.CENTER);
+        final boolean confirmed = imageScopeController == null ? JOptionPane.showConfirmDialog(owner, confirmation, "Review export selection",
+                JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE) == JOptionPane.OK_OPTION
+                : ExportPreviewDialog.confirm(owner, confirmation, () -> ExportPreviewDialog.manual(imageScopeController.registrationPreview(),
+                        service.registrationInput(), service.verifiedSource().metadata(), snapshot.exportableRois()));
+        if (!confirmed || !exportReady()) return;
+        final org.atlasalign.application.export.ExportSelection selection;
+        try {
+            selection = scope.selection();
+            if (imageScopeController != null) imageScopeController.setExportSelection(selection);
+        } catch (IllegalArgumentException invalid) {
+            showError(owner, "Select channels", invalid.getMessage());
+            return;
+        }
+        startExport(owner, folder, snapshot, selection);
+    }
+
+    /** Starts a prepared export, rechecking display and running state after the modal selection step. */
+    void startExport(final Component owner, final Path folder,
+            final ReviewerRoiSession.Snapshot snapshot,
+            final org.atlasalign.application.export.ExportSelection selection) {
+        if (!exportReady() || snapshot.exportableRois().isEmpty()) return;
+        final boolean union = includeUnion.isSelected();
+        final var exportContext = imageScopeController == null ? null : imageScopeController.captureExportContext(snapshot);
+        setExportRunning(true);
+        status.setText("Exporting untouched source pixels…");
         new SwingWorker<ManualRoiExportService.Result, String>() {
             @Override
             protected ManualRoiExportService.Result doInBackground() {
                 return exportService.orElseThrow().export(folder, sourceName,
                         snapshot.sectionId(), snapshot.exportableRois(),
-                        includeUnion.isSelected(), this::isCancelled,
+                        union, selection, this::isCancelled,
                         (message, fraction) -> publish(message + " ("
                                 + Math.round(fraction * 100) + "%)"));
             }
@@ -255,24 +312,36 @@ final class ManualRoiEditorPanel extends JPanel {
 
             @Override
             protected void done() {
-                export.setEnabled(true);
+                setExportRunning(false);
                 try {
                     final var result = get();
+                    if (imageScopeController != null) imageScopeController.recordCompletedExport(result.publishedDirectory(), exportContext);
                     status.setText("Exported "
                             + snapshot.exportableRois().size()
                             + " ROI(s) to " + result.publishedDirectory());
-                    JOptionPane.showMessageDialog(owner,
+                    if (!java.awt.GraphicsEnvironment.isHeadless()) JOptionPane.showMessageDialog(owner,
                             "Exact manual ROI export complete:\n"
                             + result.publishedDirectory(),
                             "AtlasAlign export complete",
                             JOptionPane.INFORMATION_MESSAGE);
                 } catch (final Exception error) {
                     status.setText("Export failed — source and ROI draft unchanged");
-                    showError(owner, "Manual ROI export failed",
+                    if (!java.awt.GraphicsEnvironment.isHeadless()) showError(owner, "Manual ROI export failed",
                             rootMessage(error));
                 }
             }
         }.execute();
+    }
+
+    private void setExportRunning(final boolean running) {
+        final boolean previous = exportRunning;
+        exportRunning = running;
+        refreshExportReadiness();
+        firePropertyChange("exportRunning", previous, running);
+    }
+
+    private static String escapeHtml(final String text) {
+        return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;");
     }
 
     private void buildUi() {
@@ -295,7 +364,7 @@ final class ManualRoiEditorPanel extends JPanel {
                 "Copy the selected atlas contour once as freely editable source-coordinate polygon vertices");
         convertGuide.addActionListener(event -> convertGuide());
         final JPanel guideRow = new JPanel(new BorderLayout(4, 0));
-        guideRow.add(new JLabel("Editable points"), BorderLayout.WEST);
+        guideRow.add(new JLabel("Initial editing detail"), BorderLayout.WEST);
         guideRow.add(guideVertices, BorderLayout.CENTER);
         final JTextArea guideExplanation = text(
                 "Auto chooses a manageable number of editable points.");
@@ -342,8 +411,8 @@ final class ManualRoiEditorPanel extends JPanel {
                 finish,
                 cancel,
                 text("Exclude area leaves a hole in the exported ROI, for example around a tear. It does not erase image pixels."));
-        drawingTools.setVisible(false);
-        final javax.swing.JToggleButton moreDrawing = new javax.swing.JToggleButton("More drawing tools…");
+        drawingTools.setVisible(true);
+        final javax.swing.JToggleButton moreDrawing = new javax.swing.JToggleButton("Drawing tools", true);
         moreDrawing.setName("manualRoiMoreDrawing");
         moreDrawing.addActionListener(event -> {
             drawingTools.setVisible(moreDrawing.isSelected());
@@ -390,7 +459,7 @@ final class ManualRoiEditorPanel extends JPanel {
         selectedPointRow.add(selectedVertices, BorderLayout.CENTER);
         selectedPointRow.add(applyVertexCount, BorderLayout.EAST);
         final JTextArea pointHelp = text(
-                "Apply reduces points. Shift-click edge: add. Right-click point: remove.");
+                "Simplify reduces existing vertices. Shift-click edge: add. Right-click point: remove.");
         pointHelp.setRows(2);
         content.add(section("Selected ROI points",
                 selectedVertexCount, selectedPointRow, pointHelp));
@@ -571,8 +640,7 @@ final class ManualRoiEditorPanel extends JPanel {
             cancel.setEnabled(snapshot.activePart().isPresent());
             undo.setEnabled(session.canUndo());
             redo.setEnabled(session.canRedo());
-            export.setEnabled(exportService.isPresent()
-                    && !snapshot.exportableRois().isEmpty());
+            refreshExportReadiness();
         } finally {
             updating = false;
         }

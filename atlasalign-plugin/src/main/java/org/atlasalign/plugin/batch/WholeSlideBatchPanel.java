@@ -53,6 +53,7 @@ final class WholeSlideBatchPanel extends JPanel {
             new SpinnerNumberModel(264, 0, 527, 1));
     private final JTextArea source = text("");
     private final JTextArea bounds = text("");
+    private final JTextArea sectionProgress = text("");
     private final JTextArea status = text("Ready");
     private final JLabel queueHeader = new JLabel();
     private final JButton open = new JButton("Open selected review");
@@ -133,6 +134,9 @@ final class WholeSlideBatchPanel extends JPanel {
         status.setName("batchQueueStatus");
         addInspectorRow(inspector, source);
         addInspectorRow(inspector, bounds);
+        sectionProgress.setName("batchSectionProgress");
+        sectionProgress.setRows(5);
+        addInspectorRow(inspector, sectionProgress);
         addInspectorRow(inspector, text(
                 "The starting level is an initial suggestion. Use Left/Right "
                         + "in the review to change the atlas plane."));
@@ -233,6 +237,39 @@ final class WholeSlideBatchPanel extends JPanel {
             status.setText(section.name() + " review is already open; returned to that window");
             return;
         }
+        final org.atlasalign.application.RegistrationInput input;
+        try {
+            if (project.checkpoint(item).isPresent()) {
+                // The verified checkpoint owns C/Z/T and all geometry. It must never enter new-review intake.
+                input = null;
+            } else {
+                final Path draftPath = BatchManualRoiExporter.draftFile(project, section);
+                final var recorded = org.atlasalign.plugin.review.ManualRoiSessionStore.recordedInput(draftPath);
+                if (recorded.isPresent()) {
+                    input = recorded.orElseThrow();
+                } else {
+                    final var metadata = item.verifiedSource().metadata();
+                    final JSpinner registrationChannel = new JSpinner(new SpinnerNumberModel(
+                            Math.min(settings.registrationChannel(), metadata.channels()), 1, metadata.channels(), 1));
+                    final JSpinner z = new JSpinner(new SpinnerNumberModel(1, 1, metadata.slices(), 1));
+                    final JSpinner t = new JSpinner(new SpinnerNumberModel(1, 1, metadata.frames(), 1));
+                    final JPanel scope = new JPanel(new java.awt.GridLayout(0, 2, 6, 6));
+                    scope.add(new JLabel("Registration channel")); scope.add(registrationChannel);
+                    scope.add(new JLabel("Optical Z")); scope.add(z);
+                    scope.add(new JLabel("Time point")); scope.add(t);
+                    scope.add(new JLabel("Export defaults to all channels at this Z/T."));
+                    if (JOptionPane.showConfirmDialog(this, scope, "Pin image scope for " + section.name(),
+                            JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE) != JOptionPane.OK_OPTION) return;
+                    registrationChannel.commitEdit(); z.commitEdit(); t.commitEdit();
+                    input = new org.atlasalign.application.RegistrationInput((Integer) registrationChannel.getValue(),
+                            (Integer) z.getValue(), (Integer) t.getValue());
+                }
+                input.validateAgainst(item.verifiedSource().metadata());
+            }
+        } catch (RuntimeException | java.text.ParseException invalid) {
+            JOptionPane.showMessageDialog(this, invalid.getMessage(), "Check image scope", JOptionPane.ERROR_MESSAGE);
+            return;
+        }
         project.setStatus(section.id(), BatchReviewStatus.OPENING,
                 "Preparing an independent source-preserving section crop");
         setOpening(true);
@@ -242,14 +279,15 @@ final class WholeSlideBatchPanel extends JPanel {
             protected ImagePlus doInBackground() throws Exception {
                 final ImagePlus sectionImage = new SectionImageExtractor()
                         .extract(item);
-                final int channel = Math.min(settings.registrationChannel(),
-                        sectionImage.getNChannels());
                 final var opening = BatchReviewNavigation.register(sectionImage,
-                        () -> returnToSection(section.id()));
+                        () -> returnToSection(section.id()), project, section.id());
                 try {
-                    commands.run(ReviewAlignmentCommand.class, true,
+                    new BatchSectionReviewLauncher().open(project, item, sectionImage,
+                            settings.atlasCacheDirectory().toPath(), image -> commands.run(ReviewAlignmentCommand.class, true,
                         "sourceImage", sectionImage,
-                        "registrationChannel", channel,
+                        "registrationChannel", input.channel(),
+                        "registrationSlice", input.slice(),
+                        "registrationFrame", input.frame(),
                         "maximumPreviewDimension",
                         settings.maximumPreviewDimension(),
                         "initialCoronalLevel",
@@ -272,7 +310,7 @@ final class WholeSlideBatchPanel extends JPanel {
                         "sectionSourceOffsetY", section.minimumY(),
                         "manualRoiDraftPath", project.projectDirectory()
                                 .resolve("sections").resolve(section.id())
-                                .resolve("manual-rois.json").toString()).get();
+                                .resolve("manual-rois.json").toString()).get());
                     opening.get();
                 } catch (final Exception error) {
                     BatchReviewNavigation.unregister(sectionImage);
@@ -427,6 +465,12 @@ final class WholeSlideBatchPanel extends JPanel {
             bounds.setText("Source bounds: x=" + selected.minimumX()
                     + ", y=" + selected.minimumY() + ", "
                     + selected.width() + "×" + selected.height());
+            final var progress = project.selected().progress();
+            sectionProgress.setText(progress.summary().replace(" · ", "\n")
+                    + project.checkpoint(project.selected()).map(path -> "\nCheckpoint: " + path).orElse("")
+                    + (selected.status() == BatchReviewStatus.ERROR ? "\n" + selected.statusDetail() : ""));
+            open.setText(progress.checkpointPath() == null ? "Open selected review" : "Resume saved review");
+            coronalLevel.setEnabled(progress.checkpointPath() == null);
             if (changedSection) {
                 SwingUtilities.invokeLater(() -> {
                     if (selected.id().equals(inspectedSectionId)) {
@@ -527,11 +571,18 @@ final class WholeSlideBatchPanel extends JPanel {
                 final boolean focus) {
             final BatchReviewItem item = (BatchReviewItem) value;
             final BatchSection section = item.section();
-            return super.getListCellRendererComponent(list,
+            final Component rendered = super.getListCellRendererComponent(list,
                     (index + 1) + ". " + section.name() + "  • AP "
                             + section.initialCoronalLevel() + "  • "
-                            + section.status().displayName(),
+                            + section.status().displayName() + "  • "
+                            + (item.progress().saveState() == BatchSectionProgress.SaveState.SAVED ? "Saved"
+                                    : item.progress().saveState() == BatchSectionProgress.SaveState.FAILED ? "Save failed"
+                                    : "Unsaved")
+                            + (item.progress().exportState() == BatchSectionProgress.ExportState.CURRENT ? " • Export current"
+                                    : item.progress().exportState() == BatchSectionProgress.ExportState.STALE ? " • Export stale" : ""),
                     index, selected, focus);
+            setToolTipText(item.progress().summary());
+            return rendered;
         }
     }
 }

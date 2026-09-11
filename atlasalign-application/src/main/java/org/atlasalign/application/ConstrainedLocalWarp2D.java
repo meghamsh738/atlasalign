@@ -38,6 +38,8 @@ public final class ConstrainedLocalWarp2D {
     private static final double INVERSE_TOLERANCE = 1e-9;
     private static final double MINIMUM_SOLVER_PIVOT = 1e-14;
 
+    private final int previewWidth;
+    private final int previewHeight;
     private final List<Point2D> fitSourcePoints;
     private final List<Point2D> fitTargetPoints;
     private final double[] xWeights;
@@ -48,12 +50,15 @@ public final class ConstrainedLocalWarp2D {
     private final Diagnostics diagnostics;
 
     private ConstrainedLocalWarp2D(
+            final int previewWidth, final int previewHeight,
             final List<Point2D> fitSourcePoints,
             final List<Point2D> fitTargetPoints,
             final double[] xWeights,
             final double[] yWeights,
             final double supportRadius,
             final Diagnostics diagnostics) {
+        this.previewWidth = previewWidth;
+        this.previewHeight = previewHeight;
         this.fitSourcePoints = List.copyOf(fitSourcePoints);
         this.fitTargetPoints = List.copyOf(fitTargetPoints);
         this.xWeights = xWeights.clone();
@@ -62,6 +67,60 @@ public final class ConstrainedLocalWarp2D {
         this.immutableYWeights = immutableDoubles(this.yWeights);
         this.supportRadius = supportRadius;
         this.diagnostics = Objects.requireNonNull(diagnostics, "diagnostics");
+    }
+
+    public record Snapshot(String algorithmRevision, int previewWidth, int previewHeight,
+            List<Point2D> sourcePoints, List<Point2D> targetPoints,
+            List<Double> xWeights, List<Double> yWeights, double supportRadius,
+            Diagnostics diagnostics) {
+        public Snapshot {
+            if (!ALGORITHM_REVISION.equals(algorithmRevision) || previewWidth < 1 || previewHeight < 1) {
+                throw new IllegalArgumentException("Unsupported local-warp snapshot version or dimensions");
+            }
+            sourcePoints = List.copyOf(sourcePoints); targetPoints = List.copyOf(targetPoints);
+            xWeights = List.copyOf(xWeights); yWeights = List.copyOf(yWeights);
+            Objects.requireNonNull(diagnostics, "diagnostics");
+            final int n = sourcePoints.size();
+            if (n < 4 || n > 16384 || targetPoints.size() != n || xWeights.size() != n || yWeights.size() != n
+                    || diagnostics.controlCount() != n || !Double.isFinite(supportRadius) || supportRadius <= 0
+                    || diagnostics.supportRadius() != supportRadius
+                    || xWeights.stream().anyMatch(value -> !Double.isFinite(value))
+                    || yWeights.stream().anyMatch(value -> !Double.isFinite(value))) {
+                throw new IllegalArgumentException("Invalid stored local-warp coefficients");
+            }
+        }
+    }
+
+    public Snapshot snapshot() {
+        return new Snapshot(ALGORITHM_REVISION, previewWidth, previewHeight, fitSourcePoints,
+                fitTargetPoints, immutableXWeights, immutableYWeights, supportRadius, diagnostics);
+    }
+
+    /** Copies the solved coefficients and rechecks geometry; no fit or solver is run. */
+    public static ConstrainedLocalWarp2D restore(final Snapshot saved) {
+        Objects.requireNonNull(saved, "saved");
+        final List<Point2D> sources = checkedPoints(saved.sourcePoints(), "FIT source");
+        final List<Point2D> targets = checkedPoints(saved.targetPoints(), "FIT target");
+        rejectDuplicateSources(sources);
+        final double[] x = saved.xWeights().stream().mapToDouble(Double::doubleValue).toArray();
+        final double[] y = saved.yWeights().stream().mapToDouble(Double::doubleValue).toArray();
+        final String hash = contentHash(saved.previewWidth(), saved.previewHeight(), sources,
+                targets, saved.supportRadius(), x, y);
+        if (!hash.equals(saved.diagnostics().contentHash())) {
+            throw new IllegalArgumentException("Stored local-warp geometry checksum does not match");
+        }
+        final MutableDiagnostics sampled = sampleSafetyDiagnostics(sources, List.of(), x, y,
+                saved.supportRadius(), saved.previewWidth(), saved.previewHeight());
+        rejectUnsafeJacobian(sampled);
+        final var restored = new ConstrainedLocalWarp2D(saved.previewWidth(), saved.previewHeight(),
+                sources, targets, x, y, saved.supportRadius(), saved.diagnostics());
+        for (final Point2D point : sources) {
+            final Point2D roundTrip = restored.inverse(restored.apply(point));
+            if (Math.hypot(point.x() - roundTrip.x(), point.y() - roundTrip.y()) > 1e-6) {
+                throw new IllegalArgumentException("Stored local warp failed inverse validation");
+            }
+        }
+        return restored;
     }
 
     /** Fits without independent check landmarks. */
@@ -167,7 +226,7 @@ public final class ConstrainedLocalWarp2D {
                 sampled.maximumDisplacement,
                 fitRms, checkRms, contentHash);
         return new ConstrainedLocalWarp2D(
-                sources, targets, xWeights, yWeights,
+                previewWidth, previewHeight, sources, targets, xWeights, yWeights,
                 supportRadius, diagnostics);
     }
 

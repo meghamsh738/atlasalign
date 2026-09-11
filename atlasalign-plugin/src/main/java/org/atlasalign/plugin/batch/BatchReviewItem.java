@@ -8,13 +8,19 @@ import org.atlasalign.core.SourceImageSnapshot;
 public record BatchReviewItem(
         ImagePlus source,
         SourceImageSnapshot verifiedSource,
-        BatchSection section) {
+        BatchSection section,
+        BatchSectionProgress progress) {
+
+    public BatchReviewItem(final ImagePlus source, final SourceImageSnapshot verifiedSource, final BatchSection section) {
+        this(source, verifiedSource, section, BatchSectionProgress.initial());
+    }
 
     public BatchReviewItem {
         source = Objects.requireNonNull(source, "source");
         verifiedSource = Objects.requireNonNull(
                 verifiedSource, "verifiedSource");
         section = Objects.requireNonNull(section, "section");
+        progress = Objects.requireNonNull(progress, "progress");
         if (!verifiedSource.pixelSha256().equals(
                 section.sourcePixelSha256())
                 || verifiedSource.metadata().width()
@@ -27,6 +33,10 @@ public record BatchReviewItem(
     }
 
     BatchReviewItem withSection(final BatchSection value) {
-        return new BatchReviewItem(source, verifiedSource, value);
+        return new BatchReviewItem(source, verifiedSource, value, progress);
+    }
+
+    BatchReviewItem withProgress(final BatchSectionProgress value) {
+        return new BatchReviewItem(source, verifiedSource, section, value);
     }
 }

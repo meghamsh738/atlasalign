@@ -6,12 +6,18 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import ij.io.RoiDecoder;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.zip.ZipFile;
+import loci.formats.MetadataTools;
+import loci.formats.in.OMETiffReader;
+import org.atlasalign.application.export.ExportSelection;
 import org.atlasalign.application.ReviewAcceptanceVerification;
 import org.atlasalign.core.SourceImageSnapshot;
 import org.junit.jupiter.api.Test;
@@ -59,12 +65,28 @@ class SourceSpaceExportServiceTest {
         try (ZipFile zip = new ZipFile(result.publishedDirectory().resolve(
                 "sample__atlasalign-rois.zip").toFile())) {
             assertEquals(2, zip.size());
+            final var entry = zip.entries().nextElement();
+            try (var input = zip.getInputStream(entry)) {
+                final var roi = new RoiDecoder(input.readAllBytes(), entry.getName()).getRoi();
+                assertEquals(0, roi.getCPosition());
+                assertEquals(0, roi.getZPosition());
+                assertEquals(0, roi.getTPosition());
+            }
+        }
+        try (OMETiffReader tif = new OMETiffReader()) {
+            tif.setId(result.publishedDirectory().resolve("sample__LEFT__crop.ome.tif").toString());
+            assertEquals(2, tif.getSizeC());
+            assertEquals(2, tif.getSizeZ());
+            assertEquals(2, tif.getSizeT());
+            assertEquals(8, tif.getImageCount());
         }
         final Path manifest = result.publishedDirectory().resolve(
                 "sample__atlasalign-export.json");
         final var json = new ObjectMapper().readTree(manifest.toFile());
         assertEquals("atlasalign-source-space-export-v1",
                 json.path("schema").asText());
+        assertEquals("legacy-all-czt", json.path("scope").asText());
+        assertFalse(json.has("exportSelection"));
         assertEquals("MANUAL_REVIEW",
                 json.path("acceptedAlignment").path("method").asText());
         assertEquals("VISIBLE_SIDE_ONLY", json.path("acceptedAlignment")
@@ -371,6 +393,108 @@ class SourceSpaceExportServiceTest {
                 .path("targetPoint").path("x").asDouble());
         assertEquals(2, warp.path("imageMidlinePath").size());
         assertEquals(64, warp.path("contentSha256").asText().length());
+    }
+
+    @Test
+    void selectedAtlasCropsCombinedOutputRoisAndManifestRetainSourceMapping() throws Exception {
+        final var source = ExportTestFixtures.sourceSnapshot(16, 4, 3, 2);
+        final var reader = new ExportTestFixtures.MemoryReader(source);
+        final var accepted = ExportTestFixtures.accepted(source, Optional.empty(), false);
+        final var service = new SourceSpaceExportService(reader,
+                ignored -> ExportTestFixtures.annotationPlane(),
+                () -> new ReviewAcceptanceVerification(source, ExportTestFixtures.atlasProvenance()),
+                () -> Optional.of(accepted));
+        final var selection = new ExportSelection(List.of(2, 4), 3, 2);
+        final var result = service.export(temporaryDirectory, "selected.tif", accepted,
+                List.of(ExportTestFixtures.region(1, "LEFT"), ExportTestFixtures.region(2, "RIGHT")),
+                new SourceSpaceExportOptions(true, true, true), selection,
+                () -> false, (stage, fraction) -> { });
+
+        for (final String name : List.of("selected__LEFT__crop.ome.tif", "selected__RIGHT__crop.ome.tif",
+                "selected__LEFT__masked.ome.tif", "selected__RIGHT__masked.ome.tif",
+                "selected__LEFT+RIGHT__combined.ome.tif", "selected__LEFT+RIGHT__combined__masked.ome.tif")) {
+            final boolean combined = name.contains("__combined");
+            final int expectedWidth = combined ? 8 : 4;
+            final int sourceX = name.contains("__RIGHT__") ? 4 : 0;
+            final var metadata = MetadataTools.createOMEXMLMetadata();
+            try (OMETiffReader tif = new OMETiffReader()) {
+                tif.setMetadataStore(metadata);
+                tif.setId(result.publishedDirectory().resolve(name).toString());
+                assertEquals(expectedWidth, tif.getSizeX(), name);
+                assertEquals(6, tif.getSizeY(), name);
+                assertEquals(2, tif.getSizeC(), name);
+                assertEquals(1, tif.getSizeZ(), name);
+                assertEquals(1, tif.getSizeT(), name);
+                assertEquals(16, tif.getBitsPerPixel(), name);
+                assertEquals(2, tif.getImageCount(), name);
+                assertEquals("Channel 2", metadata.getChannelName(0, 0));
+                assertEquals("Channel 4", metadata.getChannelName(0, 1));
+                assertEquals(0.65, metadata.getPixelsPhysicalSizeX(0).value().doubleValue());
+                assertEquals(0.65, metadata.getPixelsPhysicalSizeY(0).value().doubleValue());
+                final var mapping = metadata.getMapAnnotationValue(0).stream()
+                        .collect(java.util.stream.Collectors.toMap(pair -> pair.getName(), pair -> pair.getValue()));
+                assertEquals("2,4", mapping.get("atlasalign.sourceChannels"));
+                assertEquals("3", mapping.get("atlasalign.sourceSlice"));
+                assertEquals("2", mapping.get("atlasalign.sourceFrame"));
+                assertEquals(Integer.toString(sourceX), mapping.get("atlasalign.sourceOriginX"));
+                assertEquals("0", mapping.get("atlasalign.sourceOriginY"));
+                for (int outputPlane = 0; outputPlane < 2; outputPlane++) {
+                    assertEquals(outputPlane, metadata.getPlaneTheC(0, outputPlane).getValue());
+                    assertEquals(0, metadata.getPlaneTheZ(0, outputPlane).getValue());
+                    assertEquals(0, metadata.getPlaneTheT(0, outputPlane).getValue());
+                    assertEquals(4.0, metadata.getPlanePositionZ(0, outputPlane).value().doubleValue());
+                    assertEquals(3.0, metadata.getPlaneDeltaT(0, outputPlane).value().doubleValue());
+                    final ByteBuffer pixels = ByteBuffer.wrap(tif.openBytes(outputPlane))
+                            .order(tif.isLittleEndian() ? ByteOrder.LITTLE_ENDIAN : ByteOrder.BIG_ENDIAN);
+                    final int sourcePlane = 21 + 2 * outputPlane;
+                    for (int y = 0; y < 6; y++) {
+                        for (int x = 0; x < expectedWidth; x++) {
+                            assertEquals(40_000 + sourcePlane * 97 + y * 8 + sourceX + x,
+                                    pixels.getShort() & 0xffff, name);
+                        }
+                    }
+                }
+            }
+        }
+        try (ZipFile zip = new ZipFile(result.publishedDirectory()
+                .resolve("selected__atlasalign-rois.zip").toFile())) {
+            assertEquals(2, zip.size());
+            for (final String name : List.of("LEFT", "RIGHT")) {
+                final var entry = zip.getEntry(name + ".roi");
+                try (var input = zip.getInputStream(entry)) {
+                    final var roi = new RoiDecoder(input.readAllBytes(), entry.getName()).getRoi();
+                    assertEquals(0, roi.getCPosition());
+                    assertEquals(3, roi.getZPosition());
+                    assertEquals(2, roi.getTPosition());
+                    assertEquals(new java.awt.Rectangle(name.equals("LEFT") ? 0 : 4, 0, 4, 6),
+                            roi.getBounds());
+                    assertEquals(name.equals("LEFT"), roi.contains(1, 2));
+                    assertEquals(name.equals("RIGHT"), roi.contains(5, 2));
+                }
+            }
+        }
+        final var json = new ObjectMapper().readTree(result.publishedDirectory()
+                .resolve("selected__atlasalign-export.json").toFile());
+        assertEquals("selected-channels-pinned-plane", json.path("scope").asText());
+        assertEquals(4, json.path("source").path("channels").asInt());
+        assertEquals(3, json.path("source").path("slices").asInt());
+        assertEquals(2, json.path("source").path("frames").asInt());
+        final var scope = json.path("exportSelection");
+        assertEquals(List.of(2, 4), new ObjectMapper().convertValue(
+                scope.path("sourceChannelsOneBased"),
+                new com.fasterxml.jackson.core.type.TypeReference<List<Integer>>() { }));
+        assertEquals(3, scope.path("sourceSliceOneBased").asInt());
+        assertEquals(2, scope.path("sourceFrameOneBased").asInt());
+        assertEquals(2, scope.path("outputSizeC").asInt());
+        assertEquals(1, scope.path("outputSizeZ").asInt());
+        assertEquals(1, scope.path("outputSizeT").asInt());
+        assertFalse(json.path("footprintApplication")
+                .path("reusedUnchangedAcrossAllChannelsSlicesFrames").asBoolean());
+        for (final var artifact : json.path("outputs")) {
+            assertFalse(artifact.path("footprintAppliedAcrossAllSourceCztPlanes").asBoolean(),
+                    artifact.path("fileName").asText());
+        }
+        assertEquals(source, reader.snapshot());
     }
 
     private static int outputCount(

@@ -20,6 +20,32 @@ import org.junit.jupiter.api.Test;
 class ImagePlusSourceImageTest {
 
     @Test
+    void explicitOpticalPlaneIgnoresActiveFijiPositionWithoutChangingIt() {
+        final ImageStack stack = new ImageStack(8, 8);
+        for (int t = 1; t <= 2; t++) for (int z = 1; z <= 3; z++) for (int c = 1; c <= 2; c++) {
+            final short[] values = new short[64];
+            java.util.Arrays.fill(values, (short) (100 * t + 10 * z + c));
+            stack.addSlice("C" + c + " Z" + z + " T" + t, values);
+        }
+        final ImagePlus image = new ImagePlus("hyperstack", stack);
+        image.setDimensions(2, 3, 2);
+        image.setPosition(2, 3, 2);
+        final var source = new ImagePlusSourceImage(image);
+        final var before = source.snapshot();
+        final var input = new org.atlasalign.application.RegistrationInput(1, 2, 1);
+        final var result = new org.atlasalign.application.SafeImageIntakeService()
+                .preparePreview(source, input, 64);
+        assertEquals(input, org.atlasalign.application.RegistrationInput.from(result.preview()));
+        for (float pixel : result.preview().pixels()) assertEquals(121f, pixel);
+        assertEquals(2, image.getC());
+        assertEquals(3, image.getZ());
+        assertEquals(2, image.getT());
+        assertEquals(before, source.snapshot());
+        assertThrows(IllegalArgumentException.class, () -> source.createPreview(
+                new org.atlasalign.application.RegistrationInput(1, 4, 1), 64));
+    }
+
+    @Test
     void previewLeavesPixelsDimensionsChannelsAndCalibrationUnchanged() {
         final ImagePlus image = twoChannelImage();
         final ImagePlusSourceImage source = new ImagePlusSourceImage(image);

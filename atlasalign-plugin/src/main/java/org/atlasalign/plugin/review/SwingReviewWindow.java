@@ -62,6 +62,13 @@ public final class SwingReviewWindow {
             final SourceSpaceExportService exportService,
             final ManualRoiExportService manualRoiExportService,
             final ReviewerRoiSession manualRoiSession) {
+        return open(sourceTitle, controller, exportService, manualRoiExportService, manualRoiSession, null);
+    }
+
+    public static JFrame open(final String sourceTitle, final ReviewController controller,
+            final SourceSpaceExportService exportService, final ManualRoiExportService manualRoiExportService,
+            final ReviewerRoiSession manualRoiSession,
+            final org.atlasalign.plugin.project.ReviewProjectContext projectContext) {
         Objects.requireNonNull(sourceTitle, "sourceTitle");
         Objects.requireNonNull(controller, "controller");
         if (!SwingUtilities.isEventDispatchThread()) {
@@ -77,6 +84,12 @@ public final class SwingReviewWindow {
                         manualRoiExportService, manualRoiSession, sourceTitle)
                 : new SwingReviewPanel(
                         controller, exportService, sourceTitle);
+        final ChannelDisplayPanel channelDisplay = projectContext == null ? null : new ChannelDisplayPanel(controller, panel.canvas(),
+                new ChannelPreviewRenderer(projectContext.sourceImage(), controller.state().basis().sourceSnapshot().metadata(),
+                        controller.state().basis().previewDimensions().width(), controller.state().basis().previewDimensions().height()),
+                panel::setDisplayGeometryBlocked);
+        final org.atlasalign.plugin.project.ReviewProjectCoordinator project = projectContext == null ? null
+                : new org.atlasalign.plugin.project.ReviewProjectCoordinator(projectContext, controller, manualRoiSession, panel, frame);
         panel.setCloseHandler(frame::dispose);
         installEscapeCancellation(
                 frame.getRootPane(), panel::cancelCanvasInteraction);
@@ -101,17 +114,23 @@ public final class SwingReviewWindow {
         frame.addWindowListener(new WindowAdapter() {
             @Override
             public void windowClosing(final WindowEvent event) {
-                controller.close();
+                if (project == null) controller.close();
+                else project.requestClose(controller::close);
             }
 
             @Override
             public void windowClosed(final WindowEvent event) {
+                if (channelDisplay != null) channelDisplay.close();
+                if (project != null) project.close();
+                controller.close();
                 focusManager.removeKeyEventDispatcher(escapeDispatcher);
                 focusManager.removeKeyEventDispatcher(planeDispatcher);
             }
         });
         frame.setLayout(new BorderLayout());
         frame.add(panel, BorderLayout.CENTER);
+        if (channelDisplay != null) frame.add(channelDisplay, BorderLayout.NORTH);
+        if (project != null) frame.add(project.footer(), BorderLayout.SOUTH);
         frame.pack();
         final Rectangle usable = GraphicsEnvironment
                 .getLocalGraphicsEnvironment()
@@ -148,10 +167,10 @@ public final class SwingReviewWindow {
     }
 
     /**
-     * Installs AP-plane arrows on the review root pane. A root-pane binding is
+     * Installs AP-plane Page Up / Page Down keys on the review root pane. A root-pane binding is
      * more reliable than a global dispatcher in hosted AWT applications such
      * as Fiji on macOS, while Swing still gives focused editors, popups, lists,
-     * and sliders first refusal of their native arrow bindings.
+     * and sliders first refusal of their native navigation bindings.
      */
     static void installPlaneNavigation(
             final JRootPane rootPane,
@@ -165,10 +184,10 @@ public final class SwingReviewWindow {
                 navigation, "navigation");
         installPlaneNavigationKey(
                 checkedRoot, checkedFocusOwner, checkedNavigation,
-                KeyEvent.VK_LEFT, -1, "previous-atlas-plane");
+                KeyEvent.VK_PAGE_UP, -1, "previous-atlas-plane");
         installPlaneNavigationKey(
                 checkedRoot, checkedFocusOwner, checkedNavigation,
-                KeyEvent.VK_RIGHT, 1, "next-atlas-plane");
+                KeyEvent.VK_PAGE_DOWN, 1, "next-atlas-plane");
     }
 
     private static void installPlaneNavigationKey(
@@ -224,7 +243,7 @@ public final class SwingReviewWindow {
     }
 
     /**
-     * Restores review-wide AP-plane navigation without stealing the arrow
+     * Restores review-wide AP-plane navigation without stealing navigation
      * keys owned by an editor, popup, list, or another slider. Toolbar
      * buttons (notably Pan) deliberately do not opt out, so the reviewer can
      * continue changing atlas planes immediately after clicking them.
@@ -239,12 +258,12 @@ public final class SwingReviewWindow {
                 navigation, "navigation");
         if (!reviewWindowActive || event.getID() != KeyEvent.KEY_PRESSED
                 || event.getModifiersEx() != 0
-                || event.getKeyCode() != KeyEvent.VK_LEFT
-                && event.getKeyCode() != KeyEvent.VK_RIGHT
+                || event.getKeyCode() != KeyEvent.VK_PAGE_UP
+                && event.getKeyCode() != KeyEvent.VK_PAGE_DOWN
                 || preservesNativeArrowNavigation(focusOwner)) {
             return false;
         }
-        checkedNavigation.accept(event.getKeyCode() == KeyEvent.VK_LEFT
+        checkedNavigation.accept(event.getKeyCode() == KeyEvent.VK_PAGE_UP
                 ? -1 : 1);
         return true;
     }

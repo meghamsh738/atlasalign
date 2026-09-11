@@ -23,6 +23,31 @@ class ManualRoiSessionStoreTest {
     Path temporaryDirectory;
 
     @Test
+    void scopedMigrationPreservesLegacyDraftAndRequiresExplicitUnknownOpticalPlane() throws Exception {
+        final Path file = temporaryDirectory.resolve("legacy.json");
+        final var roiSession = new ReviewerRoiSession("section", 40, 30);
+        roiSession.newPolygon("unfinished", ReviewerRoiSide.LEFT, RoiPartOperation.ADD);
+        roiSession.addVertex(new Point2D(4, 5));
+        new ManualRoiSessionStore(file, "section", 40, 30, "a".repeat(64)).saveNow(roiSession.snapshot());
+        final byte[] legacy = java.nio.file.Files.readAllBytes(file);
+        final var image = ij.IJ.createHyperStack("synthetic", 40, 30, 3, 2, 2, 16);
+        final var metadata = new org.atlasalign.io.imagej.ImagePlusSourceImage(image).snapshot().metadata();
+        assertThrows(IllegalStateException.class, () -> ManualRoiSessionStore.recordedExportSelection(file, metadata));
+        final var input = new org.atlasalign.application.RegistrationInput(2, 2, 1);
+        final var selection = new org.atlasalign.application.export.ExportSelection(List.of(1, 3), 2, 1);
+        final var scoped = new ManualRoiSessionStore(file, "section", 40, 30, "a".repeat(64), input, () -> selection);
+        final var restored = scoped.loadOrCreate();
+        assertEquals(roiSession.snapshot().rois(), restored.snapshot().rois());
+        scoped.saveNow(restored.snapshot());
+        org.junit.jupiter.api.Assertions.assertArrayEquals(legacy, java.nio.file.Files.readAllBytes(file));
+        assertEquals(input, ManualRoiSessionStore.recordedInput(file).orElseThrow());
+        assertEquals(selection, ManualRoiSessionStore.recordedExportSelection(file, metadata));
+        assertThrows(IllegalStateException.class, () -> new ManualRoiSessionStore(file, "section", 40, 30,
+                "a".repeat(64), new org.atlasalign.application.RegistrationInput(1, 1, 1),
+                () -> selection).loadOrCreate());
+    }
+
+    @Test
     void autosaveRoundTripRestoresExactGeometryAndFreshIdentifiers() {
         final Path file = temporaryDirectory.resolve("manual-rois.json");
         final String sourceHash = "b".repeat(64);

@@ -133,6 +133,35 @@ class ReviewCanvasContourTest {
     }
 
     @Test
+    void incompleteDetectionCanBeUnclippedWithoutMovingAtlasGeometry() {
+        final boolean[] detected = new boolean[100 * 80];
+        for (int y = 10; y < 70; y++) {
+            for (int x = 10; x < 42; x++) detected[y * 100 + x] = true;
+        }
+        final var basis = ReviewPluginFixtures.scaledAtlasBasisWithMask(
+                BinaryMask.fromBooleans(100, 80, detected));
+        final var session = new AlignmentReviewSession(basis);
+        final var plane = ReviewPluginFixtures.plane(240);
+        final var model = new ReviewViewModel(
+                ReviewPluginFixtures.segmentedPreview(), session.state(),
+                session.confidence(), Optional.of(plane), false,
+                Optional.empty(), false, Optional.empty(), Optional.empty(),
+                false, false, false, false, false);
+        final var clipped = ReviewCanvas.overlayImage(model, plane, true);
+        final var full = ReviewCanvas.overlayImage(model, plane, false);
+        int restored = 0;
+        for (int y = 0; y < full.getHeight(); y++) {
+            for (int x = 50; x < full.getWidth(); x++) {
+                assertEquals(0, clipped.getRGB(x, y) >>> 24);
+                if ((full.getRGB(x, y) >>> 24) != 0) restored++;
+            }
+        }
+        assertTrue(restored > 0,
+                "turning clipping off must restore atlas lines in tissue missed by detection");
+        assertEquals(model.reviewState().content(), session.state().content());
+    }
+
+    @Test
     void manualWarpLeavesReviewedTissueSupportFixedInPreviewSpace() {
         final var basis = ReviewPluginFixtures.segmentedScaledAtlasBasis();
         final var session = new AlignmentReviewSession(basis);

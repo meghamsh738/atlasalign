@@ -49,5 +49,6 @@ public enum ReviewOperation {
     UNDO,
     REDO,
     ACCEPT,
-    REVOKE_ACCEPTANCE
+    REVOKE_ACCEPTANCE,
+    REOPEN_PROJECT
 }

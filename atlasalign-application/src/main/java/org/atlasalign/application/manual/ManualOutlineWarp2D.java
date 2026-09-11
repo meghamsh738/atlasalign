@@ -105,6 +105,84 @@ public final class ManualOutlineWarp2D implements ReviewedOutlineTransform2D {
         this.diagnostics = Objects.requireNonNull(diagnostics, "diagnostics");
     }
 
+    public record Snapshot(List<Point2D> atlasLoop, List<Point2D> tissueLoop,
+            List<AnchorPair> anchors, List<Point2D> sourceControlPoints,
+            List<Point2D> targetControlPoints, List<Double> xWeights, List<Double> yWeights,
+            double supportRadius, Diagnostics diagnostics) {
+        public Snapshot {
+            atlasLoop = List.copyOf(atlasLoop); tissueLoop = List.copyOf(tissueLoop);
+            anchors = List.copyOf(anchors); sourceControlPoints = List.copyOf(sourceControlPoints);
+            targetControlPoints = List.copyOf(targetControlPoints);
+            xWeights = List.copyOf(xWeights); yWeights = List.copyOf(yWeights);
+            Objects.requireNonNull(diagnostics, "diagnostics");
+            final int count = sourceControlPoints.size();
+            if (!ALGORITHM_REVISION.equals(diagnostics.algorithmRevision())
+                    || !PIXEL_CENTER_CONVENTION.equals(diagnostics.pixelCenterConvention())
+                    || atlasLoop.size() > 16384 || tissueLoop.size() > 16384
+                    || count != diagnostics.controlPairCount()
+                    || count > MAXIMUM_ADAPTIVE_CONTROL_COUNT || targetControlPoints.size() != count
+                    || xWeights.size() != count || yWeights.size() != count
+                    || !Double.isFinite(supportRadius) || supportRadius <= 0
+                    || supportRadius != diagnostics.supportRadius()
+                    || diagnostics.regularization() != REGULARIZATION
+                    || xWeights.stream().anyMatch(value -> !Double.isFinite(value))
+                    || yWeights.stream().anyMatch(value -> !Double.isFinite(value))) {
+                throw new IllegalArgumentException("Unsupported or invalid stored outline-warp geometry");
+            }
+        }
+    }
+
+    public Snapshot snapshot() {
+        return new Snapshot(atlasLoop, tissueLoop, anchors, sourceControlPoints, targetControlPoints,
+                immutableXWeights, immutableYWeights, supportRadius, diagnostics);
+    }
+
+    /** Restores recorded solved coefficients and validates them without refitting the outline. */
+    public static ManualOutlineWarp2D restore(final Snapshot saved) {
+        Objects.requireNonNull(saved, "saved");
+        final ValidatedInput input = validatedInput(saved.atlasLoop(), saved.tissueLoop(), saved.anchors());
+        final Diagnostics d = saved.diagnostics();
+        if (input.atlasDirection() != d.atlasTraversalDirection()
+                || input.tissueDirection() != d.tissueTraversalDirection()) {
+            throw new IllegalArgumentException("Stored outline traversal does not match its geometry");
+        }
+        final double[] x = saved.xWeights().stream().mapToDouble(Double::doubleValue).toArray();
+        final double[] y = saved.yWeights().stream().mapToDouble(Double::doubleValue).toArray();
+        final String hash = contentHash(saved.atlasLoop(), saved.tissueLoop(), saved.anchors(),
+                d.atlasTraversalDirection(), d.tissueTraversalDirection(), d.previewWidth(), d.previewHeight(),
+                saved.sourceControlPoints(), saved.targetControlPoints(), saved.supportRadius(), x, y,
+                d.strictBoundaryQualityEnforced(), d.seedSamplesPerAnchorArc(), d.denseCorrespondenceCount());
+        if (!hash.equals(d.contentSha256())) {
+            throw new IllegalArgumentException("Stored outline-warp geometry checksum does not match");
+        }
+        final double diagonal = Math.hypot(d.previewWidth(), d.previewHeight());
+        requireControlCoverage(saved.sourceControlPoints(), d.previewWidth(), d.previewHeight());
+        final MutableDiagnostics sampled = sampleSafety(saved.sourceControlPoints(), x, y,
+                saved.supportRadius(), d.previewWidth(), d.previewHeight(), saved.atlasLoop());
+        rejectUnsafeSampledGeometry(sampled, diagonal);
+        final double[] residuals = controlResiduals(saved.sourceControlPoints(), saved.targetControlPoints(),
+                x, y, saved.supportRadius());
+        if (residuals[1] > MAXIMUM_CONTROL_RESIDUAL_FRACTION * diagonal) {
+            throw new IllegalArgumentException("Stored outline control residual exceeds its safety limit");
+        }
+        final WarpFunction function = new WarpFunction(saved.sourceControlPoints(), x, y, saved.supportRadius());
+        final List<Point2D> warpedLoop = saved.atlasLoop().stream().map(function::apply).toList();
+        requireSimpleLoop(warpedLoop, "stored warped atlas exterior");
+        requireNoGridCrossings(function, d.previewWidth(), d.previewHeight());
+        requireInverseRoundTrips(function, d.previewWidth(), d.previewHeight(), saved.atlasLoop());
+        if (d.strictBoundaryQualityEnforced()) {
+            final BoundaryDistances distances = boundaryDistances(warpedLoop, saved.tissueLoop());
+            if (distances.p95() > Math.max(STRICT_BOUNDARY_P95_MINIMUM_PIXELS,
+                    STRICT_BOUNDARY_P95_DIAGONAL_FRACTION * diagonal)
+                    || distances.maximum() > Math.max(STRICT_BOUNDARY_MAXIMUM_MINIMUM_PIXELS,
+                    STRICT_BOUNDARY_MAXIMUM_DIAGONAL_FRACTION * diagonal)) {
+                throw new IllegalArgumentException("Stored outline does not meet its strict boundary gate");
+            }
+        }
+        return new ManualOutlineWarp2D(saved.atlasLoop(), saved.tissueLoop(), saved.anchors(),
+                saved.sourceControlPoints(), saved.targetControlPoints(), x, y, saved.supportRadius(), d);
+    }
+
     /**
      * Fits a warp between two simple closed loops in preview-pixel space.
      * Neither loop repeats its first vertex at the end.

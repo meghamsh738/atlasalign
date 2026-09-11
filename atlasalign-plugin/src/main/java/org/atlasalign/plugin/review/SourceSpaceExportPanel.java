@@ -81,6 +81,8 @@ final class SourceSpaceExportPanel extends JPanel {
     private AcceptedAlignmentSnapshot accepted;
     private Path selectedFolder;
     private boolean running;
+    private boolean displayGeometryBlocked;
+    private ExportSelectionPanel exportSelectionPanel;
 
     SourceSpaceExportPanel(
             final ReviewController controller,
@@ -97,7 +99,17 @@ final class SourceSpaceExportPanel extends JPanel {
         add(content(), BorderLayout.CENTER);
         add(actions(), BorderLayout.SOUTH);
         wireActions();
-        cancel.setEnabled(false);
+        setRunningState(false);
+    }
+
+    void setDisplayGeometryBlocked(final boolean blocked) {
+        displayGeometryBlocked = blocked;
+        setRunningState(running);
+    }
+
+    private boolean exportReady() {
+        return !displayGeometryBlocked && !running && !choices.isEmpty()
+                && selectedFolder != null && accepted != null;
     }
 
     void setAcceptedAlignment(
@@ -124,11 +136,13 @@ final class SourceSpaceExportPanel extends JPanel {
             search.setText("DG");
             runSearch();
         }
+        setRunningState(running);
     }
 
     void acceptanceInvalidated() {
         cancelExport();
         accepted = null;
+        setRunningState(running);
         backHandler.run();
     }
 
@@ -153,6 +167,9 @@ final class SourceSpaceExportPanel extends JPanel {
                 "The canonical crop keeps every source value in its tight rectangle. The binary mask and Fiji ROI identify the irregular region; optional masked images zero only pixels outside that region.");
         panel.add(note);
         panel.add(calibrationWarning);
+        exportSelectionPanel = new ExportSelectionPanel(controller.state().basis().sourceSnapshot().metadata(),
+                controller.exportSelection());
+        panel.add(exportSelectionPanel);
         return panel;
     }
 
@@ -320,8 +337,7 @@ final class SourceSpaceExportPanel extends JPanel {
         }
         chosenRegions.revalidate();
         chosenRegions.repaint();
-        export.setEnabled(!running && !choices.isEmpty()
-                && selectedFolder != null && accepted != null);
+        setRunningState(running);
     }
 
     private void chooseFolder() {
@@ -336,20 +352,22 @@ final class SourceSpaceExportPanel extends JPanel {
             chooser.setCurrentDirectory(selectedFolder.toFile());
         }
         if (chooser.showOpenDialog(this) == JFileChooser.APPROVE_OPTION) {
-            selectedFolder = chooser.getSelectedFile().toPath()
-                    .toAbsolutePath().normalize();
-            final String display = selectedFolder.getFileName() == null
-                    ? selectedFolder.toString()
-                    : selectedFolder.getFileName().toString();
-            folder.setText(ellipsize(display, 20));
-            folder.setToolTipText(selectedFolder.toString());
-            rebuildChoices();
+            setDestination(chooser.getSelectedFile().toPath());
         }
     }
 
-    private void startExport() {
-        if (running || accepted == null || selectedFolder == null
-                || choices.isEmpty()) {
+    void setDestination(final Path destination) {
+        selectedFolder = Objects.requireNonNull(destination, "destination").toAbsolutePath().normalize();
+        final String display = selectedFolder.getFileName() == null
+                ? selectedFolder.toString() : selectedFolder.getFileName().toString();
+        folder.setText(ellipsize(display, 20));
+        folder.setToolTipText(selectedFolder.toString());
+        rebuildChoices();
+    }
+
+    void startExport() {
+        if (displayGeometryBlocked || running) return;
+        if (!exportReady()) {
             status("Choose regions and an output folder first", true);
             return;
         }
@@ -364,22 +382,40 @@ final class SourceSpaceExportPanel extends JPanel {
                         combined.isSelected(),
                         fullSourceMask.isSelected(),
                         maskedSourceCrop.isSelected());
+        final org.atlasalign.application.export.ExportSelection selection;
+        try {
+            selection = exportSelectionPanel.selection();
+            controller.setExportSelection(selection);
+        } catch (IllegalArgumentException invalid) {
+            status(invalid.getMessage(), true);
+            return;
+        }
         final Path destination = selectedFolder;
-        running = true;
+        if (!GraphicsEnvironment.isHeadless()) {
+            final JPanel summary = new JPanel(new java.awt.GridLayout(0, 1, 0, 5));
+            summary.add(new JLabel("Regions: " + selections.stream().map(ExportRegionSelection::displayName).collect(java.util.stream.Collectors.joining(", "))));
+            summary.add(new JLabel("Channels: " + selection.channels() + " · pinned Z " + selection.slice() + " · T " + selection.frame()));
+            summary.add(new JLabel("Destination: " + destination));
+            final var plane = controller.exportPreviewPlane();
+            if (!ExportPreviewDialog.confirm(this, summary, () -> ExportPreviewDialog.atlas(controller.registrationPreview(),
+                    controller.registrationInput(), snapshot, plane, selections))) return;
+        }
+        if (!exportReady() || accepted != snapshot) return;
+        final var exportContext = controller.captureExportContext();
         cancelled.set(false);
-        setRunningState(true);
+        setExportRunning(true);
         worker.execute(() -> {
             try {
                 final SourceSpaceExportService.Result result = exporter.export(
                         destination, sourceName, snapshot, selections,
-                        options,
+                        options, selection,
                         cancelled::get,
                         (stage, fraction) -> SwingUtilities.invokeLater(() -> {
                             progress.setValue((int) Math.round(
                                     100 * Math.max(0, Math.min(1, fraction))));
                             status(stage, false);
                         }));
-                SwingUtilities.invokeLater(() -> exportFinished(result));
+                SwingUtilities.invokeLater(() -> exportFinished(result, exportContext));
             } catch (final RuntimeException error) {
                 SwingUtilities.invokeLater(() -> exportFailed(error));
             }
@@ -387,11 +423,11 @@ final class SourceSpaceExportPanel extends JPanel {
     }
 
     private void exportFinished(
-            final SourceSpaceExportService.Result result) {
-        running = false;
-        setRunningState(false);
+            final SourceSpaceExportService.Result result, final ReviewController.ExportContext exportContext) {
+        setExportRunning(false);
         progress.setValue(100);
         status("Exported to " + result.publishedDirectory(), false);
+        controller.recordCompletedExport(result.publishedDirectory(), exportContext);
         status.setToolTipText(result.publishedDirectory().toString());
         if (!GraphicsEnvironment.isHeadless()) {
             final String warning = result.warnings().isEmpty() ? ""
@@ -406,8 +442,7 @@ final class SourceSpaceExportPanel extends JPanel {
     }
 
     private void exportFailed(final RuntimeException error) {
-        running = false;
-        setRunningState(false);
+        setExportRunning(false);
         final boolean wasCancelled = error instanceof ExportCancelledException
                 || cancelled.get();
         status(wasCancelled
@@ -429,19 +464,27 @@ final class SourceSpaceExportPanel extends JPanel {
     }
 
     private void setRunningState(final boolean active) {
-        search.setEnabled(!active);
-        searchButton.setEnabled(!active);
-        searchResults.setEnabled(!active);
-        addSelection.setEnabled(!active);
-        chooseFolder.setEnabled(!active);
-        combined.setEnabled(!active);
-        fullSourceMask.setEnabled(!active);
-        maskedSourceCrop.setEnabled(!active);
-        setEnabledRecursively(chosenRegions, !active);
-        export.setEnabled(!active && !choices.isEmpty()
-                && selectedFolder != null && accepted != null);
+        final boolean editable = !active && !displayGeometryBlocked;
+        search.setEnabled(editable);
+        searchButton.setEnabled(editable);
+        searchResults.setEnabled(editable);
+        addSelection.setEnabled(editable);
+        chooseFolder.setEnabled(editable);
+        combined.setEnabled(editable);
+        fullSourceMask.setEnabled(editable);
+        maskedSourceCrop.setEnabled(editable);
+        setEnabledRecursively(chosenRegions, editable);
+        setEnabledRecursively(exportSelectionPanel, editable);
+        export.setEnabled(exportReady());
         cancel.setEnabled(active);
-        back.setEnabled(!active);
+        back.setEnabled(editable);
+    }
+
+    private void setExportRunning(final boolean active) {
+        final boolean previous = running;
+        running = active;
+        setRunningState(active);
+        firePropertyChange("exportRunning", previous, active);
     }
 
     private static void setEnabledRecursively(

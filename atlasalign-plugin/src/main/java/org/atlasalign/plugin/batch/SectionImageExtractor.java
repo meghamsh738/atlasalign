@@ -52,6 +52,8 @@ final class SectionImageExtractor {
                 section.sourceName());
         result.setProperty("AtlasAlign.batch.parentSha256",
                 section.sourcePixelSha256());
+        org.atlasalign.plugin.project.ReviewProjectContext.sourcePath(source).ifPresent(path ->
+                result.setProperty("AtlasAlign.batch.parentPath", path));
         result.setProperty("AtlasAlign.batch.sourceOffsetX",
                 section.minimumX());
         result.setProperty("AtlasAlign.batch.sourceOffsetY",

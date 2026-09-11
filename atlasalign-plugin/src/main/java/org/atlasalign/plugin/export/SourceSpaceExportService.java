@@ -28,6 +28,7 @@ import org.atlasalign.application.AcceptedAlignmentSnapshot;
 import org.atlasalign.application.ReviewAcceptanceVerification;
 import org.atlasalign.application.ReviewAcceptanceVerifier;
 import org.atlasalign.application.export.SourcePixelReader;
+import org.atlasalign.application.export.ExportSelection;
 import org.atlasalign.atlas.AtlasCoronalPlane;
 import org.atlasalign.plugin.export.AtlasAlignExportManifestWriter.Artifact;
 import org.atlasalign.plugin.review.AtlasPlaneRequest;
@@ -36,7 +37,7 @@ import org.atlasalign.plugin.review.AtlasPlaneSource;
 /** Complete fail-closed, atomic Phase 6 source-space export transaction. */
 public final class SourceSpaceExportService {
 
-    public static final String PLUGIN_VERSION = "0.1.0-SNAPSHOT";
+    public static final String PLUGIN_VERSION = "0.1.0-beta.3";
 
     public record Result(
             Path publishedDirectory,
@@ -100,6 +101,25 @@ public final class SourceSpaceExportService {
             final SourceSpaceExportOptions exportOptions,
             final BooleanSupplier cancelled,
             final BiConsumer<String, Double> progress) {
+        return exportInternal(selectedFolder, sourceName, expectedAcceptance, selections,
+                exportOptions, Optional.empty(), cancelled, progress);
+    }
+
+    public Result export(final Path selectedFolder, final String sourceName,
+            final AcceptedAlignmentSnapshot expectedAcceptance,
+            final List<ExportRegionSelection> selections,
+            final SourceSpaceExportOptions exportOptions, final ExportSelection selection,
+            final BooleanSupplier cancelled, final BiConsumer<String, Double> progress) {
+        Objects.requireNonNull(selection, "selection").validateAgainst(expectedAcceptance.verifiedSource().metadata());
+        return exportInternal(selectedFolder, sourceName, expectedAcceptance, selections,
+                exportOptions, Optional.of(selection), cancelled, progress);
+    }
+
+    private Result exportInternal(final Path selectedFolder, final String sourceName,
+            final AcceptedAlignmentSnapshot expectedAcceptance,
+            final List<ExportRegionSelection> selections,
+            final SourceSpaceExportOptions exportOptions, final Optional<ExportSelection> selection,
+            final BooleanSupplier cancelled, final BiConsumer<String, Double> progress) {
         final Path parent = Objects.requireNonNull(
                 selectedFolder, "selectedFolder")
                 .toAbsolutePath().normalize();
@@ -170,8 +190,8 @@ public final class SourceSpaceExportService {
                 final double baseProgress = 0.42
                         + 0.42 * outputIndex / outputs.size();
                 final double span = 0.42 / outputs.size();
-                final var cropReport = ome.writeSourceCrop(
-                        crop, stem, source, footprint, cancellation,
+                final var cropReport = ScopedCropWriter.write(ome, false,
+                        crop, stem, source, footprint, selection, cancellation,
                         value -> reporter.accept(
                                 "Writing " + regionToken + " source crop",
                                 baseProgress + span * 0.45 * value));
@@ -186,9 +206,9 @@ public final class SourceSpaceExportService {
                 artifacts.add(artifact("mask", mask, footprint));
                 validateOme(crop, footprint.bounds().width(),
                         footprint.bounds().height(),
-                        accepted.verifiedSource().metadata().channels(),
-                        accepted.verifiedSource().metadata().slices(),
-                        accepted.verifiedSource().metadata().frames(),
+                        selection.map(value -> value.channels().size()).orElse(accepted.verifiedSource().metadata().channels()),
+                        selection.isPresent() ? 1 : accepted.verifiedSource().metadata().slices(),
+                        selection.isPresent() ? 1 : accepted.verifiedSource().metadata().frames(),
                         accepted.verifiedSource().metadata().bitDepth());
                 validateOme(mask, footprint.bounds().width(),
                         footprint.bounds().height(), 1, 1, 1, 8);
@@ -210,9 +230,9 @@ public final class SourceSpaceExportService {
                 }
                 if (options.includeMaskedSourceCrop()) {
                     checkCancelled(cancellation);
-                    final var maskedReport = ome.writeMaskedSourceCrop(
+                    final var maskedReport = ScopedCropWriter.write(ome, true,
                             masked, stem + " masked image", source,
-                            footprint, cancellation,
+                            footprint, selection, cancellation,
                             value -> reporter.accept(
                                     "Writing " + regionToken
                                             + " masked image",
@@ -224,9 +244,9 @@ public final class SourceSpaceExportService {
                             "masked_crop", masked, footprint));
                     validateOme(masked, footprint.bounds().width(),
                             footprint.bounds().height(),
-                            accepted.verifiedSource().metadata().channels(),
-                            accepted.verifiedSource().metadata().slices(),
-                            accepted.verifiedSource().metadata().frames(),
+                            selection.map(value -> value.channels().size()).orElse(accepted.verifiedSource().metadata().channels()),
+                            selection.isPresent() ? 1 : accepted.verifiedSource().metadata().slices(),
+                            selection.isPresent() ? 1 : accepted.verifiedSource().metadata().frames(),
                             accepted.verifiedSource().metadata().bitDepth());
                 }
                 outputIndex++;
@@ -238,7 +258,11 @@ public final class SourceSpaceExportService {
             // The ROI ZIP contains one entry for every explicit top-level
             // selection.  The optional combined union is a derived crop/mask,
             // not another ontology selection.
-            roiZip.write(rois, individual);
+            if (selection.isPresent()) {
+                roiZip.write(rois, individual, selection.orElseThrow().slice(), selection.orElseThrow().frame());
+            } else {
+                roiZip.write(rois, individual);
+            }
             created.add(rois);
             validateRoiZip(rois, individual.size());
             artifacts.add(artifact("roi_zip", rois, null));
@@ -255,7 +279,7 @@ public final class SourceSpaceExportService {
                     sourceBase + "__atlasalign-export.json");
             manifest.write(manifestPath, originalName, accepted,
                     PLUGIN_VERSION, ome.verifyRuntimeVersion(), planeHash,
-                    distinct(warnings), artifacts);
+                    distinct(warnings), artifacts, selection);
             created.add(manifestPath);
             validateManifest(manifestPath);
             final Artifact manifestArtifact = artifact(

@@ -75,7 +75,7 @@ public final class ReviewCanvas extends JComponent {
     private static final double MINIMUM_ZOOM = 0.25;
     private static final double MAXIMUM_ZOOM = 16;
     private static final double BUTTON_ZOOM_FACTOR = 1.25;
-    private static final double HANDLE_HIT_RADIUS = 10;
+    private static final double HANDLE_HIT_RADIUS = 14;
     /** A compact visible ring with a forgiving, screen-space hit target. */
     static final double MANUAL_WARP_HIT_RADIUS = 7;
     static final int MANUAL_WARP_TARGET_DIAMETER = 9;
@@ -99,11 +99,16 @@ public final class ReviewCanvas extends JComponent {
     private final ExecutorService renderExecutor;
     private volatile ReviewViewModel model;
     private volatile BufferedImage previewImage;
+    private BufferedImage displayedChannelImage;
+    private boolean channelDisplayEnabled;
+    private boolean displayInspection;
+    private String channelDisplayLabel;
     private volatile BufferedImage overlayImage;
     private volatile PlacementLayers placementOverlays;
     private volatile BufferedImage beforeOverlayImage;
     private volatile BufferedImage boundaryWarpGhostImage;
     private volatile BufferedImage exportedRoiPreviewImage;
+    private volatile BufferedImage exportedRoiDimmingOverlay;
     private volatile BufferedImage atlasImage;
     private volatile RenderPaths renderPaths;
     private volatile RenderKey requestedRenderKey;
@@ -135,6 +140,9 @@ public final class ReviewCanvas extends JComponent {
     private double tissuePanY;
     private double atlasPanX;
     private double atlasPanY;
+    private boolean aspectRatioLocked = true;
+    private boolean outerBoundariesOnly = true;
+    private PlacementTool placementTool = PlacementTool.ALL;
     private boolean landmarkLabelsVisible;
     private boolean deformationGridVisible;
     private boolean displacementLinesVisible = true;
@@ -249,6 +257,50 @@ public final class ReviewCanvas extends JComponent {
                 spaceDown = false;
             }
         });
+        bindNudge(KeyEvent.VK_LEFT, -1, 0); bindNudge(KeyEvent.VK_RIGHT, 1, 0);
+        bindNudge(KeyEvent.VK_UP, 0, -1); bindNudge(KeyEvent.VK_DOWN, 0, 1);
+    }
+
+    private void bindNudge(final int key, final int dx, final int dy) {
+        for (int modifiers : new int[]{0, KeyEvent.SHIFT_DOWN_MASK}) {
+            final int step = modifiers == 0 ? 1 : 10;
+            final String action = "nudge-" + key + "-" + step;
+            getInputMap(WHEN_FOCUSED).put(KeyStroke.getKeyStroke(key, modifiers), action);
+            getActionMap().put(action, new AbstractAction() {
+                @Override public void actionPerformed(final ActionEvent event) {
+                    if (interactionTool == InteractionTool.TRANSFORM) translateSourcePixels(dx * step, dy * step);
+                }
+            });
+        }
+    }
+
+    public void translateSourcePixels(final double dx, final double dy) {
+        if (!precisionEditingAvailable()) return;
+        final var source = model.reviewState().basis().sourceSnapshot().metadata();
+        interactionListener.translate(dx * model.preview().width() / source.width(), dy * model.preview().height() / source.height());
+    }
+
+    public boolean precisionEditingAvailable() {
+        return model != null && !displayInspection && (!channelDisplayEnabled || displayedChannelImage != null)
+                && manualInteractionEnabled() && !hasLocalDeformation() && !exactBoundaryMapActive()
+                && !model.boundaryFit().active();
+    }
+
+    public Point2D transformPivot() {
+        final Selection selection = baseSelection();
+        if (selection == null) throw new IllegalStateException("Place the atlas before changing rotation or scale");
+        return selection.center;
+    }
+
+    public void rotateDegrees(final double degrees) {
+        if (!precisionEditingAvailable()) return;
+        interactionListener.rotateRadians(Math.toRadians(degrees), transformPivot());
+    }
+
+    public void scalePercent(final double x, final double y) {
+        if (!precisionEditingAvailable()) return;
+        final Selection selection = baseSelection();
+        interactionListener.scaleAxes(x / 100, (aspectRatioLocked ? x : y) / 100, selection.axisRadians, selection.center);
     }
 
     public void setInteractionListener(
@@ -633,6 +685,40 @@ public final class ReviewCanvas extends JComponent {
         return comparisonMode;
     }
 
+    public boolean aspectRatioLocked() { return aspectRatioLocked; }
+    public void setAspectRatioLocked(final boolean locked) { aspectRatioLocked = locked; }
+    public boolean outerBoundariesOnly() { return outerBoundariesOnly; }
+    public void setOuterBoundariesOnly(final boolean outer) {
+        if (outerBoundariesOnly == outer) return;
+        outerBoundariesOnly = outer;
+        if (model != null) { requestedRenderKey = renderKey(model, selectedRegionContour); scheduleCurrentRender(); }
+        repaint();
+    }
+    public PlacementTool placementTool() { return placementTool; }
+    public void setPlacementTool(final PlacementTool tool) { placementTool = Objects.requireNonNull(tool); cancelCurrentInteraction(); repaint(); }
+
+    public org.atlasalign.plugin.project.ReviewUiState.Viewport viewport() {
+        return new org.atlasalign.plugin.project.ReviewUiState.Viewport(tissueZoom, tissuePanX, tissuePanY,
+                atlasZoom, atlasPanX, atlasPanY);
+    }
+
+    public void restoreViewport(final org.atlasalign.plugin.project.ReviewUiState.Viewport viewport) {
+        tissueZoom = viewport.tissueZoom(); tissuePanX = viewport.tissuePanX(); tissuePanY = viewport.tissuePanY();
+        atlasZoom = viewport.atlasZoom(); atlasPanX = viewport.atlasPanX(); atlasPanY = viewport.atlasPanY();
+        repaint();
+    }
+
+    public void requestChannelDisplay(final String label, final boolean inspection) {
+        channelDisplayEnabled = true; displayedChannelImage = null; channelDisplayLabel = label;
+        displayInspection = inspection; cancelCurrentInteraction(); repaint();
+    }
+
+    public void setChannelDisplay(final BufferedImage image, final String label) {
+        if (image != null && model != null && (image.getWidth() != model.preview().width()
+                || image.getHeight() != model.preview().height())) throw new IllegalArgumentException("Display image dimensions differ from review geometry");
+        displayedChannelImage = image; channelDisplayLabel = label; repaint();
+    }
+
     public void fitTissueView() {
         tissueZoom = 1;
         tissuePanX = 0;
@@ -727,7 +813,7 @@ public final class ReviewCanvas extends JComponent {
                 ? 0 : selectedRegionContour.boundaryCount();
         final RenderKey key = renderKey(nextModel, selectedRegionContour);
         requestedRenderKey = key;
-        exportedRoiPreviewImage = null;
+        exportedRoiPreviewImage = null; exportedRoiDimmingOverlay = null;
         // Keep no geometry from a different revision visible while the new
         // immutable render request is being prepared off the EDT.
         overlayImage = null;
@@ -772,7 +858,7 @@ public final class ReviewCanvas extends JComponent {
                         requestModel, contour, key.gridVisible(),
                         key.tissueClippingEnabled()
                                 && !key.placementPreview(),
-                        sidePathCache);
+                        key.outerBoundariesOnly() ? null : sidePathCache, key.outerBoundariesOnly());
                 if (!key.equals(requestedRenderKey)) return;
                 final BufferedImage nextOverlay = plane == null ? null
                         : renderOverlayImage(requestModel, nextPaths, contour,
@@ -800,9 +886,10 @@ public final class ReviewCanvas extends JComponent {
                                 new Color(key.dimRegionArgb(), true),
                                 Float.intBitsToFloat(
                                         key.strokeWidthBits()));
-                final BufferedImage nextExportedRoiPreview = plane == null
-                        || !key.exportedRoiPreviewVisible()
-                        ? null : exportedRoiPreviewImage(requestModel, plane);
+                final BufferedImage nextDimming = plane == null || !key.exportedRoiPreviewVisible()
+                        ? null : exportedRoiDimmingOverlay(requestModel, plane);
+                final BufferedImage nextExportedRoiPreview = nextDimming == null ? null
+                        : dimPreview(previewImage(requestModel.preview()), nextDimming);
                 javax.swing.SwingUtilities.invokeLater(() -> {
                     if (!key.equals(requestedRenderKey)) {
                         return;
@@ -812,7 +899,7 @@ public final class ReviewCanvas extends JComponent {
                     beforeOverlayImage = nextBeforeOverlay;
                     atlasImage = nextAtlas;
                     boundaryWarpGhostImage = nextBoundaryGhost;
-                    exportedRoiPreviewImage = nextExportedRoiPreview;
+                    exportedRoiPreviewImage = nextExportedRoiPreview; exportedRoiDimmingOverlay = nextDimming;
                     renderPaths = nextPaths;
                     repaint();
                 });
@@ -894,6 +981,7 @@ public final class ReviewCanvas extends JComponent {
                 boundaryWarpPreviewVisible, exportedRoiPreviewVisible,
                 interactionTool == InteractionTool.TRANSFORM
                         && !hasLocalDeformation(),
+                outerBoundariesOnly,
                 dimRegionColor.getRGB(),
                 Float.floatToIntBits(regionStrokeWidth));
     }
@@ -912,6 +1000,12 @@ public final class ReviewCanvas extends JComponent {
             final boolean gridVisible,
             final boolean clipToTissue,
             final Map<SidePathCacheKey, List<LineSegment>> pathCache) {
+        return buildRenderPaths(requestModel, contour, gridVisible, clipToTissue, pathCache, false);
+    }
+
+    private static RenderPaths buildRenderPaths(final ReviewViewModel requestModel, final SelectedAtlasContour contour,
+            final boolean gridVisible, final boolean clipToTissue,
+            final Map<SidePathCacheKey, List<LineSegment>> pathCache, final boolean outerOnly) {
         final List<LineSegment> atlasSegments = contour == null
                 || !contour.isPresent()
                 ? List.of() : contourSegments(contour);
@@ -921,7 +1015,7 @@ public final class ReviewCanvas extends JComponent {
         final AtlasCoronalPlane plane = requestModel.atlasPlane()
                 .orElse(null);
         final List<LineSegment> atlasBoundarySegments = plane == null
-                ? List.of() : annotationBoundarySegments(plane);
+                ? List.of() : annotationBoundarySegments(plane, outerOnly);
         final List<LineSegment> tissueBoundarySegments = new ArrayList<>();
         final List<SidedLineSegment> sidedTissueBoundarySegments =
                 new ArrayList<>();
@@ -1197,9 +1291,14 @@ public final class ReviewCanvas extends JComponent {
      */
     private static List<LineSegment> annotationBoundarySegments(
             final AtlasCoronalPlane plane) {
+        return annotationBoundarySegments(plane, false);
+    }
+
+    private static List<LineSegment> annotationBoundarySegments(final AtlasCoronalPlane plane, final boolean outerOnly) {
         final int width = plane.width();
         final int height = plane.height();
         final int[] labels = plane.annotationId();
+        if (outerOnly) for (int index = 0; index < labels.length; index++) labels[index] = labels[index] == 0 ? 0 : 1;
         final List<LineSegment> result = new ArrayList<>();
         for (int y = 0; y < height; y++) {
             for (int x = 0; x < width; x++) {
@@ -1753,16 +1852,22 @@ public final class ReviewCanvas extends JComponent {
                     RenderingHints.KEY_INTERPOLATION,
                     RenderingHints.VALUE_INTERPOLATION_BILINEAR);
             final ScreenMapping source = sourceScreenMapping();
-            drawPaneLabel(canvas, manualRoiLayer.previewSelected()
+            drawPaneLabel(canvas, channelDisplayEnabled ? channelDisplayLabel : manualRoiLayer.previewSelected()
                             ? "Manual ROI export preview — selected polygons bright • remaining image 20% • exact export uses source pixels"
                             : exportedRoiPreviewVisible
                             ? "Export preview — selected ROI bright • remaining tissue 20% • exact export uses source pixels"
                             : "Tissue + reviewer-controlled overlay",
                     0, sourcePaneWidth());
-            canvas.drawImage(exportedRoiPreviewVisible
+            canvas.drawImage(channelDisplayEnabled ? displayedChannelImage : exportedRoiPreviewVisible
                             && exportedRoiPreviewImage != null
                             ? exportedRoiPreviewImage : previewImage,
                     imageToScreen(source), null);
+            if (displayInspection || channelDisplayEnabled && displayedChannelImage == null) {
+                return;
+            }
+            if (channelDisplayEnabled && exportedRoiPreviewVisible && exportedRoiDimmingOverlay != null) {
+                canvas.drawImage(exportedRoiDimmingOverlay, imageToScreen(source), null);
+            }
             if (beforeOverlayImage != null
                     && comparisonMode != ComparisonMode.AFTER) {
                 drawOverlayImage(canvas, beforeOverlayImage, source,
@@ -2296,7 +2401,8 @@ public final class ReviewCanvas extends JComponent {
         requestFocusInWindow();
         final Point point = event.getPoint();
         if (event.getButton() == MouseEvent.BUTTON2
-                || spaceDown || interactionTool == InteractionTool.PAN) {
+                || spaceDown || interactionTool == InteractionTool.PAN || displayInspection
+                || channelDisplayEnabled && displayedChannelImage == null) {
             if (paneAt(point) != Pane.NONE) {
                 dragOrigin = point;
                 lastDragPoint = point;
@@ -2333,9 +2439,9 @@ public final class ReviewCanvas extends JComponent {
             }
             return;
         }
-        if (interactionTool == InteractionTool.POINTS) {
+        if (interactionTool == InteractionTool.POINTS || interactionTool == InteractionTool.LANDMARKS) {
             if (!manualWarpEditingEnabled) return;
-            if (tissueSupportEditing && paneAt(point) == Pane.TISSUE) {
+            if (interactionTool == InteractionTool.POINTS && tissueSupportEditing && paneAt(point) == Pane.TISSUE) {
                 final ReviewedTissueSupport.Control crop =
                         tissueSupportControlAt(point);
                 if (event.isAltDown() && crop != null) {
@@ -2359,19 +2465,19 @@ public final class ReviewCanvas extends JComponent {
                     return;
                 }
             }
-            final Gesture manual = manualWarpGestureAt(point);
+            final Gesture manual = interactionTool == InteractionTool.POINTS ? manualWarpGestureAt(point) : null;
             if (manual != null) {
                 gesture = manual;
                 dragOrigin = point;
                 return;
             }
-            final Gesture structure = structureWarpGestureAt(point);
+            final Gesture structure = interactionTool == InteractionTool.POINTS ? structureWarpGestureAt(point) : null;
             if (structure != null) {
                 gesture = structure;
                 dragOrigin = point;
                 return;
             }
-            if (manualWarpPointArmed && paneAt(point) == Pane.TISSUE
+            if (interactionTool == InteractionTool.POINTS && manualWarpPointArmed && paneAt(point) == Pane.TISSUE
                     && contains(sourceScreenMapping(), point)) {
                 manualWarpPointArmed = false;
                 final Point2D current = sourceScreenMapping().screenToPreview(
@@ -2524,7 +2630,7 @@ public final class ReviewCanvas extends JComponent {
             clampPan(gesture.pane);
             lastDragPoint = point;
         } else {
-            updateGesture(point, event.isShiftDown());
+            updateGesture(point, aspectRatioLocked || event.isShiftDown());
         }
         repaint();
     }
@@ -2581,7 +2687,7 @@ public final class ReviewCanvas extends JComponent {
             repaint();
             return;
         }
-        updateGesture(event.getPoint(), event.isShiftDown());
+        updateGesture(event.getPoint(), aspectRatioLocked || event.isShiftDown());
         final Gesture committed = gesture;
         dragOrigin = null;
         lastDragPoint = null;
@@ -2707,7 +2813,8 @@ public final class ReviewCanvas extends JComponent {
         for (int index = 0; index < selection.corners.length; index++) {
             final Point2D screen = mapping.previewToScreen(
                     selection.corners[index]);
-            if (distance(screen, point) <= HANDLE_HIT_RADIUS) {
+            if ((placementTool == PlacementTool.ALL || placementTool == PlacementTool.SCALE)
+                    && distance(screen, point) <= HANDLE_HIT_RADIUS) {
                 final Point2D pivot = selection.corners[(index + 2) % 4];
                 final Point2D start = mapping.screenToPreview(
                         new Point2D(point.x, point.y));
@@ -2718,7 +2825,8 @@ public final class ReviewCanvas extends JComponent {
         for (int index = 0; index < selection.edgeMidpoints.length; index++) {
             final Point2D screen = mapping.previewToScreen(
                     selection.edgeMidpoints[index]);
-            if (distance(screen, point) <= HANDLE_HIT_RADIUS) {
+            if ((placementTool == PlacementTool.ALL || placementTool == PlacementTool.SCALE)
+                    && distance(screen, point) <= HANDLE_HIT_RADIUS) {
                 final Point2D pivot = selection.edgeMidpoints[
                         (index + 2) % 4];
                 final Point2D start = mapping.screenToPreview(
@@ -2732,15 +2840,17 @@ public final class ReviewCanvas extends JComponent {
         }
         final Point2D rotationScreen = mapping.previewToScreen(
                 selection.rotationHandle);
-        if (distance(rotationScreen, point) <= HANDLE_HIT_RADIUS) {
+        if ((placementTool == PlacementTool.ALL || placementTool == PlacementTool.ROTATE)
+                && distance(rotationScreen, point) <= HANDLE_HIT_RADIUS) {
             final Point2D start = mapping.screenToPreview(
                     new Point2D(point.x, point.y));
             return Gesture.rotate(selection.center,
                     angle(selection.center, start));
         }
-        if (selection.screenPolygon(mapping).contains(point)
+        if ((placementTool == PlacementTool.ALL || placementTool == PlacementTool.MOVE)
+                && (selection.screenPolygon(mapping).contains(point)
                 || !disjoinedTransformEnabled()
-                && contains(mapping, point)) {
+                && contains(mapping, point))) {
             return Gesture.translate(mapping.screenToPreview(
                     new Point2D(point.x, point.y)));
         }
@@ -4116,15 +4226,14 @@ public final class ReviewCanvas extends JComponent {
         final Point2D center = mapping.previewToScreen(selection.center);
         final Point2D rotation = mapping.previewToScreen(
                 selection.rotationHandle);
-        canvas.drawLine(rounded(center.x()), rounded(center.y()),
-                rounded(rotation.x()), rounded(rotation.y()));
-        for (final Point2D corner : corners) {
-            handle(canvas, corner, false);
+        if (placementTool == PlacementTool.ALL || placementTool == PlacementTool.ROTATE) {
+            canvas.drawLine(rounded(center.x()), rounded(center.y()), rounded(rotation.x()), rounded(rotation.y()));
+            handle(canvas, rotation, true);
         }
-        for (final Point2D edgeMidpoint : edgeMidpoints) {
-            handle(canvas, edgeMidpoint, false);
+        if (placementTool == PlacementTool.ALL || placementTool == PlacementTool.SCALE) {
+            for (final Point2D corner : corners) handle(canvas, corner, false);
+            for (final Point2D edgeMidpoint : edgeMidpoints) handle(canvas, edgeMidpoint, false);
         }
-        handle(canvas, rotation, true);
     }
 
     private Selection selection() {
@@ -4814,6 +4923,22 @@ public final class ReviewCanvas extends JComponent {
     static BufferedImage exportedRoiPreviewImage(
             final ReviewViewModel model,
             final AtlasCoronalPlane plane) {
+        final BufferedImage dimming = exportedRoiDimmingOverlay(model, plane);
+        return dimming == null ? null : dimPreview(previewImage(model.preview()), dimming);
+    }
+
+    private static BufferedImage dimPreview(final BufferedImage source, final BufferedImage dimming) {
+        final BufferedImage result = new BufferedImage(source.getWidth(), source.getHeight(), BufferedImage.TYPE_BYTE_GRAY);
+        final byte[] input = ((DataBufferByte) source.getRaster().getDataBuffer()).getData();
+        final byte[] output = ((DataBufferByte) result.getRaster().getDataBuffer()).getData();
+        for (int y = 0; y < source.getHeight(); y++) for (int x = 0; x < source.getWidth(); x++) {
+            final int index = y * source.getWidth() + x; final int intensity = Byte.toUnsignedInt(input[index]);
+            output[index] = (byte) (dimming.getRGB(x, y) >>> 24 == 0 ? intensity : Math.round(intensity * .20f));
+        }
+        return result;
+    }
+
+    static BufferedImage exportedRoiDimmingOverlay(final ReviewViewModel model, final AtlasCoronalPlane plane) {
         final SelectedAtlasRegion selection = model.selectedAtlasRegion()
                 .orElse(null);
         if (selection == null) {
@@ -4833,27 +4958,17 @@ public final class ReviewCanvas extends JComponent {
                 .tissueClippingEnabled()
                 ? projection.content().reviewedTissueSupport().orElseThrow()
                 : null;
-        final BufferedImage source = previewImage(model.preview());
-        final BufferedImage result = new BufferedImage(
-                source.getWidth(), source.getHeight(),
-                BufferedImage.TYPE_BYTE_GRAY);
-        final byte[] input = ((DataBufferByte) source.getRaster()
-                .getDataBuffer()).getData();
-        final byte[] output = ((DataBufferByte) result.getRaster()
-                .getDataBuffer()).getData();
+        final BufferedImage result = new BufferedImage(model.preview().width(), model.preview().height(), BufferedImage.TYPE_INT_ARGB);
         final int[] labels = plane.annotationId();
-        for (int y = 0; y < source.getHeight(); y++) {
-            for (int x = 0; x < source.getWidth(); x++) {
-                final int index = y * source.getWidth() + x;
+        for (int y = 0; y < result.getHeight(); y++) {
+            for (int x = 0; x < result.getWidth(); x++) {
                 boolean included = support == null || support.contains(x, y);
                 if (included) {
                     included = selectedAtlasMembership(
                             projection, selection, plane, labels,
                             new Point2D(x, y));
                 }
-                final int intensity = Byte.toUnsignedInt(input[index]);
-                output[index] = (byte) (included ? intensity
-                        : Math.round(intensity * 0.20f));
+                result.setRGB(x, y, included ? 0 : 0xcc000000);
             }
         }
         return result;
@@ -5539,9 +5654,12 @@ public final class ReviewCanvas extends JComponent {
                 || Math.abs(point.y()) > 1e-12);
     }
 
+    public enum PlacementTool { ALL, MOVE, ROTATE, SCALE }
+
     public enum InteractionTool {
         TRANSFORM,
         BORDER,
+        LANDMARKS,
         POINTS,
         PAN
     }
@@ -6032,6 +6150,7 @@ public final class ReviewCanvas extends JComponent {
             boolean boundaryWarpPreviewVisible,
             boolean exportedRoiPreviewVisible,
             boolean placementPreview,
+            boolean outerBoundariesOnly,
             int dimRegionArgb,
             int strokeWidthBits) {
     }

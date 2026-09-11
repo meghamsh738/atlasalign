@@ -1,3 +1,22 @@
+# AtlasAlign Lite 0.1.0-beta.3
+
+Community beta prepared 11 September 2026. Install into a separate Fiji copy for evaluation.
+
+## Changes
+
+- Multichannel and composite inspection with registration pinned to a selected C/Z/T.
+- Selected-channel exports from the reviewed optical plane, with source-coordinate crops and masks.
+- Complete review-project saving, Save as, autosave, exact geometry and ROI-draft restoration, plus batch checkpoints.
+- Clearer manual Move/Rotate/Scale controls, numeric adjustments, and tissue-clipping control.
+
+## Validation and limits
+
+The underlying candidate passed 947 Java and 271 Python tests, with 16 environment skips, plus Windows/macOS/Linux CI. Fresh macOS checks covered multichannel intake, display controls, save/reopen, ROI drafts, selected-plane export and unsaved-close behavior. Independent TIFF reading verified exported source pixels, masks, calibration and C/Z/T mappings. Windows/Linux native GUI and a full native batch walkthrough were not performed; batch and migration behavior have automated coverage.
+
+The release changes version metadata and documentation without changing alignment behavior. Release packaging verification is recorded alongside the downloadable artifacts. Atlas alignment still requires anatomical review; these checks do not establish anatomical accuracy. The earlier demo shows the workflow using the earlier UI.
+
+---
+
 # AtlasAlign Lite 0.1.0-beta.1
 
 Community beta, 8 September 2026. Install into a separate Fiji copy for evaluation.

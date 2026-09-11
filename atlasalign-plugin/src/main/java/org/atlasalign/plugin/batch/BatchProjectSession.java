@@ -2,7 +2,6 @@ package org.atlasalign.plugin.batch;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.IOException;
-import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
@@ -15,6 +14,8 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.CopyOnWriteArrayList;
 import org.atlasalign.core.Point2D;
+import org.atlasalign.application.export.ExportSelection;
+import org.atlasalign.application.roi.ReviewerRoiSession;
 
 /**
  * Small persistent queue for standalone images or marked whole-slide
@@ -23,8 +24,10 @@ import org.atlasalign.core.Point2D;
  */
 public final class BatchProjectSession {
 
-    static final String SCHEMA = "atlasalign-review-batch-v1";
-    static final String FILE_NAME = "batch-project.json";
+    static final String SCHEMA = "atlasalign-review-batch-v2";
+    static final String FILE_NAME = "batch-project-v2.json";
+    static final String LEGACY_SCHEMA = "atlasalign-review-batch-v1";
+    static final String LEGACY_FILE_NAME = "batch-project.json";
 
     private final String projectName;
     private final String createdAt;
@@ -160,6 +163,58 @@ public final class BatchProjectSession {
         return projectDirectory.resolve(FILE_NAME);
     }
 
+    Path defaultCheckpoint(final BatchSection section) {
+        return projectDirectory.resolve("sections").resolve(section.id()).resolve("review.atlasalign.json");
+    }
+
+    Optional<Path> checkpoint(final BatchReviewItem item) {
+        return Optional.ofNullable(item.progress().checkpointPath())
+                .map(value -> projectDirectory.resolve(value).toAbsolutePath().normalize());
+    }
+
+    synchronized void reviewProgress(final String sectionId, final long revision, final boolean accepted,
+            final ReviewerRoiSession.Snapshot rois, final ExportSelection selection,
+            final Path checkpoint, final String saveState) {
+        final int index = indexOf(sectionId);
+        final BatchReviewItem item = items.get(index);
+        if (!rois.sectionId().equals(sectionId) || rois.sourceWidth() != item.section().width()
+                || rois.sourceHeight() != item.section().height()) throw new IllegalArgumentException("Review progress belongs to another section");
+        selection.validateAgainst(item.verifiedSource().metadata());
+        final var next = item.progress().review(revision, accepted, rois, selection,
+                checkpoint == null ? null : BatchSectionProgress.reference(projectDirectory, checkpoint),
+                BatchSectionProgress.SaveState.valueOf(saveState));
+        replaceProgress(index, next);
+    }
+
+    synchronized void exported(final String sectionId, final Path directory) {
+        final var progress = items.get(indexOf(sectionId)).progress();
+        if (progress.exportSelection() == null || progress.roiContentSha256().isEmpty()) {
+            throw new IllegalStateException("Record the exported review and ROI scope before marking export progress");
+        }
+        replaceProgress(indexOf(sectionId), progress.withExport(new BatchSectionProgress.ExportStamp(
+                progress.alignmentRevision(), progress.roiContentSha256(), progress.exportSelection(),
+                directory.toAbsolutePath().normalize().toString())));
+    }
+
+    synchronized void exportedSnapshot(final String sectionId, final long revision,
+            final ReviewerRoiSession.Snapshot rois, final ExportSelection selection, final Path directory) {
+        final int index = indexOf(sectionId);
+        var current = items.get(index).progress();
+        // Legacy drafts can be exported before the first full review. Record that known ROI state only.
+        if (current.roiRevision() < 0) current = current.withSnapshot(revision, false, rois, selection,
+                current.checkpointPath(), current.saveState());
+        replaceProgress(index, current.withExport(new BatchSectionProgress.ExportStamp(revision,
+                BatchSectionProgress.roiHash(rois), selection, directory.toAbsolutePath().normalize().toString())));
+    }
+
+    private void replaceProgress(final int index, final BatchSectionProgress progress) {
+        if (items.get(index).progress().equals(progress)) return;
+        final List<BatchReviewItem> updated = new ArrayList<>(items);
+        updated.set(index, updated.get(index).withProgress(progress));
+        items = List.copyOf(updated);
+        save(); notifyListeners();
+    }
+
     void addListener(final Runnable listener) {
         listeners.add(Objects.requireNonNull(listener, "listener"));
     }
@@ -173,12 +228,9 @@ public final class BatchProjectSession {
             json.writerWithDefaultPrettyPrinter().writeValue(
                     temporary.toFile(), document());
             try {
-                Files.move(temporary, target,
-                        StandardCopyOption.REPLACE_EXISTING,
-                        StandardCopyOption.ATOMIC_MOVE);
-            } catch (final AtomicMoveNotSupportedException unsupported) {
-                Files.move(temporary, target,
-                        StandardCopyOption.REPLACE_EXISTING);
+                Files.move(temporary, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+            } finally {
+                Files.deleteIfExists(temporary);
             }
         } catch (final IOException error) {
             throw new IllegalStateException(
@@ -218,6 +270,7 @@ public final class BatchProjectSession {
                     section.initialCoronalLevel());
             value.put("status", section.status().name());
             value.put("statusDetail", section.statusDetail());
+            value.put("progress", item.progress());
             sections.add(value);
         }
         root.put("sections", sections);

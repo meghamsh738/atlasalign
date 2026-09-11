@@ -17,6 +17,8 @@ import java.util.Objects;
 import java.util.UUID;
 import java.util.function.BiConsumer;
 import java.util.function.BooleanSupplier;
+import org.atlasalign.application.export.ExportSelection;
+import org.atlasalign.application.roi.ReviewerRoiSession;
 import org.atlasalign.io.imagej.ImagePlusSourceImage;
 import org.atlasalign.io.imagej.ImagePlusSourcePixelReader;
 import org.atlasalign.plugin.export.ManualRoiExportService;
@@ -24,6 +26,13 @@ import org.atlasalign.plugin.review.ManualRoiSessionStore;
 
 /** Atomically publishes every autosaved, export-selected ROI in a queue. */
 final class BatchManualRoiExporter {
+    private final BatchReviewCheckpoint checkpoints;
+
+    BatchManualRoiExporter() { this(new BatchReviewCheckpoint()); }
+    BatchManualRoiExporter(final BatchReviewCheckpoint checkpoints) { this.checkpoints = Objects.requireNonNull(checkpoints); }
+
+    private record ExportedSection(String id, long alignmentRevision, ReviewerRoiSession.Snapshot rois,
+            ExportSelection selection, Path relativeDirectory) { }
 
     record Result(
             Path publishedDirectory,
@@ -63,7 +72,7 @@ final class BatchManualRoiExporter {
         final Path temporary = parent.resolve("." + destination.getFileName()
                 + ".tmp-" + UUID.randomUUID());
         final List<Map<String, Object>> exports = new ArrayList<>();
-        final List<String> exportedSectionIds = new ArrayList<>();
+        final List<ExportedSection> exportedSections = new ArrayList<>();
         final List<String> skipped = new ArrayList<>();
         final List<String> warnings = new ArrayList<>();
         int roiCount = 0;
@@ -74,44 +83,66 @@ final class BatchManualRoiExporter {
                 final BatchReviewItem item = items.get(index);
                 final BatchSection section = item.section();
                 reporter.accept("Reading " + section.name()
-                        + " autosaved ROIs", (double) index / items.size());
+                        + " saved ROIs", (double) index / items.size());
                 final ImagePlus sectionImage = new SectionImageExtractor()
                         .extract(item);
                 final var sectionSnapshot = new ImagePlusSourceImage(
                         sectionImage).snapshot();
-                final Path draft = draftFile(checkedProject, section);
-                if (!Files.isRegularFile(draft)) {
-                    skipped.add(section.name()
-                            + " — no autosaved manual ROI draft");
-                    continue;
+                final ReviewerRoiSession.Snapshot savedRois;
+                final ExportSelection selection;
+                final int registrationChannel;
+                final long alignmentRevision;
+                final var checkpoint = checkedProject.checkpoint(item);
+                if (checkpoint.isPresent()) {
+                    final var saved = checkpoints.read(checkpoint.orElseThrow(), item, sectionImage);
+                    savedRois = saved.rois();
+                    selection = saved.exportSelection();
+                    registrationChannel = saved.registrationInput().channel();
+                    alignmentRevision = saved.alignment().contentRevision();
+                    if (item.progress().saveState() != BatchSectionProgress.SaveState.SAVED) {
+                        warnings.add(section.name() + ": exported the saved checkpoint; unsaved edits are not included.");
+                    }
+                } else {
+                    final Path draft = draftFile(checkedProject, section);
+                    if (!Files.isRegularFile(draft) && !Files.isRegularFile(ManualRoiSessionStore.scopedFile(draft))) {
+                        skipped.add(section.name()
+                                + " — no autosaved manual ROI draft");
+                        continue;
+                    }
+                    final var recordedInput = ManualRoiSessionStore.recordedInput(draft);
+                    if (recordedInput.isEmpty() && (sectionImage.getNChannels() > 1
+                            || sectionImage.getNSlices() > 1 || sectionImage.getNFrames() > 1)) {
+                        throw new IllegalStateException("Legacy ROI draft for " + section.name()
+                                + " has no recorded C/Z/T scope. Open the section review and explicitly pin the image scope before exporting.");
+                    }
+                    selection = ManualRoiSessionStore.recordedExportSelection(draft, sectionSnapshot.metadata());
+                    final Path availableDraft = Files.isRegularFile(ManualRoiSessionStore.scopedFile(draft))
+                            ? ManualRoiSessionStore.scopedFile(draft) : draft;
+                    final var session = new ManualRoiSessionStore(availableDraft,
+                            section.id(), section.width(), section.height(),
+                            sectionSnapshot.pixelSha256()).loadOrCreate();
+                    savedRois = session.snapshot();
+                    registrationChannel = recordedInput.map(org.atlasalign.application.RegistrationInput::channel).orElse(1);
+                    alignmentRevision = item.progress().alignmentRevision();
                 }
-                final var session = new ManualRoiSessionStore(draft,
-                        section.id(), section.width(), section.height(),
-                        sectionSnapshot.pixelSha256()).loadOrCreate();
-                final var rois = session.snapshot().exportableRois();
+                final var rois = savedRois.exportableRois();
                 if (rois.isEmpty()) {
                     skipped.add(section.name()
                             + " — no finished ROI selected for export");
                     continue;
                 }
-                final var parentContext =
-                        new ManualRoiExportService.ParentSourceContext(
-                                section.sourceName(),
-                                section.sourcePixelSha256(),
-                                section.sourceWidth(), section.sourceHeight(),
-                                section.minimumX(), section.minimumY());
+                final var parentContext = BatchReviewCheckpoint.parentContext(section);
                 final var service = new ManualRoiExportService(
                         new ImagePlusSourcePixelReader(sectionImage),
                         sectionSnapshot,
-                        Math.max(1, Math.min(preferredChannel,
-                                sectionImage.getNChannels())),
-                        Math.max(1, sectionImage.getZ()),
-                        Math.max(1, sectionImage.getT()),
+                        registrationChannel,
+                        selection.slice(),
+                        selection.frame(),
                         java.util.Optional.of(parentContext));
                 final double start = (double) index / items.size();
                 final double span = 1.0 / items.size();
                 final var result = service.export(temporary,
-                        section.name() + ".tif", section.id(), rois, true,
+                        section.name() + ".tif", section.id(), rois, true, selection,
                         cancellation, (message, fraction) -> reporter.accept(
                                 section.name() + " — " + message,
                                 start + span * fraction));
@@ -119,13 +150,17 @@ final class BatchManualRoiExporter {
                 row.put("sectionId", section.id());
                 row.put("sectionName", section.name());
                 row.put("roiCount", rois.size());
+                row.put("exportSelection", selection);
+                row.put("alignmentRevision", alignmentRevision);
+                checkpoint.ifPresent(path -> row.put("reviewCheckpoint", path.toString()));
                 row.put("relativeDirectory", temporary.relativize(
                         result.publishedDirectory()).toString());
                 row.put("warnings", result.warnings());
                 exports.add(row);
                 warnings.addAll(result.warnings());
                 roiCount += rois.size();
-                exportedSectionIds.add(section.id());
+                exportedSections.add(new ExportedSection(section.id(), alignmentRevision, savedRois, selection,
+                        temporary.relativize(result.publishedDirectory())));
             }
             if (exports.isEmpty()) {
                 throw new IllegalStateException(
@@ -144,15 +179,9 @@ final class BatchManualRoiExporter {
                     index);
             checkCancelled(cancellation);
             publish(temporary, destination);
-            for (final String sectionId : exportedSectionIds) {
-                final int count = exports.stream().filter(row ->
-                        sectionId.equals(row.get("sectionId")))
-                        .mapToInt(row -> (Integer) row.get("roiCount"))
-                        .findFirst().orElse(0);
-                checkedProject.setStatus(sectionId,
-                        BatchReviewStatus.COMPLETE,
-                        "Batch-exported " + count
-                                + " exact manual ROI(s)");
+            for (final var exported : exportedSections) {
+                checkedProject.exportedSnapshot(exported.id(), exported.alignmentRevision(), exported.rois(),
+                        exported.selection(), destination.resolve(exported.relativeDirectory()));
             }
             reporter.accept("Batch manual ROI export complete", 1.0);
             return new Result(destination, exports.size(), roiCount,

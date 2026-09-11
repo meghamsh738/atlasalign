@@ -28,6 +28,8 @@ import java.util.function.BiConsumer;
 import java.util.function.BooleanSupplier;
 import javax.imageio.ImageIO;
 import org.atlasalign.application.export.SourcePixelReader;
+import org.atlasalign.application.export.ExportSelection;
+import org.atlasalign.application.RegistrationInput;
 import org.atlasalign.application.roi.ManualRoiFootprint;
 import org.atlasalign.application.roi.ReviewerRoi;
 import org.atlasalign.core.SourceImageSnapshot;
@@ -149,6 +151,11 @@ public final class ManualRoiExportService {
         return verifiedSource;
     }
 
+    public RegistrationInput registrationInput() {
+        return new RegistrationInput(previewChannel, previewSlice, previewFrame);
+    }
+
+    /** Compatibility API: exports every source C/Z/T plane. */
     public Result export(
             final Path selectedFolder,
             final String sourceName,
@@ -157,6 +164,26 @@ public final class ManualRoiExportService {
             final boolean includeUnion,
             final BooleanSupplier cancelled,
             final BiConsumer<String, Double> progress) {
+        return exportInternal(selectedFolder, sourceName, sectionId, requestedRois,
+                includeUnion, Optional.empty(), cancelled, progress);
+    }
+
+    public Result export(final Path selectedFolder, final String sourceName,
+            final String sectionId, final List<ReviewerRoi> requestedRois,
+            final boolean includeUnion, final ExportSelection selection,
+            final BooleanSupplier cancelled, final BiConsumer<String, Double> progress) {
+        Objects.requireNonNull(selection, "selection").validateAgainst(verifiedSource.metadata());
+        if (selection.slice() != previewSlice || selection.frame() != previewFrame) {
+            throw new IllegalArgumentException("Export must use the pinned registration Z/T");
+        }
+        return exportInternal(selectedFolder, sourceName, sectionId, requestedRois,
+                includeUnion, Optional.of(selection), cancelled, progress);
+    }
+
+    private Result exportInternal(final Path selectedFolder, final String sourceName,
+            final String sectionId, final List<ReviewerRoi> requestedRois,
+            final boolean includeUnion, final Optional<ExportSelection> selection,
+            final BooleanSupplier cancelled, final BiConsumer<String, Double> progress) {
         final Path parent = Objects.requireNonNull(
                 selectedFolder, "selectedFolder")
                 .toAbsolutePath().normalize();
@@ -235,8 +262,8 @@ public final class ManualRoiExportService {
                 final Path localRoi = sectionDirectory.resolve(
                         stem + "__crop-local-roi.zip");
 
-                warnings.addAll(ome.writeSourceCrop(raw, roi.name(),
-                        source, footprint, cancellation,
+                warnings.addAll(ScopedCropWriter.write(ome, false, raw, roi.name(),
+                        source, footprint, selection, cancellation,
                         fraction -> reporter.accept(
                                 "Writing " + roi.name()
                                         + " original-pixel crop",
@@ -244,17 +271,21 @@ public final class ManualRoiExportService {
                 warnings.addAll(ome.writeMask(mask,
                         roi.name() + " exact mask", footprint,
                         verifiedSource.metadata()).warnings());
-                warnings.addAll(ome.writeMaskedSourceCrop(masked,
+                warnings.addAll(ScopedCropWriter.write(ome, true, masked,
                         roi.name() + " masked crop", source, footprint,
-                        cancellation, fraction -> reporter.accept(
+                        selection, cancellation, fraction -> reporter.accept(
                                 "Writing " + roi.name()
                                         + " masked source crop",
                                 start + span * (0.42
                                         + 0.36 * fraction))).warnings());
                 writeQcPreview(qc, footprint);
-                roiZip.writeSingle(localRoi, roi.name(), footprint,
-                        footprint.bounds().minimumX(),
-                        footprint.bounds().minimumY());
+                if (selection.isPresent()) {
+                    roiZip.writeSingle(localRoi, roi.name(), footprint,
+                            footprint.bounds().minimumX(), footprint.bounds().minimumY(), 1, 1);
+                } else {
+                    roiZip.writeSingle(localRoi, roi.name(), footprint,
+                            footprint.bounds().minimumX(), footprint.bounds().minimumY());
+                }
 
                 addArtifact(artifacts, "raw_source_crop", checkedSection,
                         roi.name(), temporary, raw);
@@ -273,8 +304,7 @@ public final class ManualRoiExportService {
                     + (parentSource.isPresent()
                             ? "__manual-rois-section-coordinates.zip"
                             : "__manual-rois-source-coordinates.zip"));
-            roiZip.write(masterRois, footprints, roiTokens.stream()
-                    .map(token -> token + ".roi").toList());
+            writeSourceRois(masterRois, footprints, roiTokens, selection);
             addArtifact(artifacts, parentSource.isPresent()
                             ? "master_section_roi_zip"
                             : "master_source_roi_zip",
@@ -289,8 +319,7 @@ public final class ManualRoiExportService {
                         wholeSlide.sourceName());
                 final Path slideRois = temporary.resolve(parentBase
                         + "__manual-rois-whole-slide-coordinates.zip");
-                roiZip.write(slideRois, slideFootprints, roiTokens.stream()
-                        .map(token -> token + ".roi").toList());
+                writeSourceRois(slideRois, slideFootprints, roiTokens, selection);
                 addArtifact(artifacts, "master_whole_slide_roi_zip",
                         checkedSection, "all", temporary, slideRois);
             }
@@ -314,7 +343,7 @@ public final class ManualRoiExportService {
             final Path manifest = temporary.resolve(
                     sourceBase + "__manual-roi-export.json");
             writeManifest(manifest, originalName, checkedSection, rois,
-                    manual, artifacts, warnings);
+                    manual, artifacts, warnings, selection);
             addArtifact(artifacts, "manifest", checkedSection, "all",
                     temporary, manifest);
             final Path csv = temporary.resolve(
@@ -560,6 +589,17 @@ public final class ManualRoiExportService {
         return values;
     }
 
+    private void writeSourceRois(final Path file, final List<SourceRegionFootprint> footprints,
+            final List<String> roiTokens, final Optional<ExportSelection> selection) {
+        final List<String> names = roiTokens.stream().map(token -> token + ".roi").toList();
+        if (selection.isPresent()) {
+            roiZip.write(file, footprints, names, selection.orElseThrow().slice(),
+                    selection.orElseThrow().frame());
+        } else {
+            roiZip.write(file, footprints, names);
+        }
+    }
+
     private void writeManifest(
             final Path file,
             final String sourceName,
@@ -567,7 +607,8 @@ public final class ManualRoiExportService {
             final List<ReviewerRoi> rois,
             final List<ManualRoiFootprint> footprints,
             final List<OutputArtifact> artifacts,
-            final List<String> warnings) throws IOException {
+            final List<String> warnings,
+            final Optional<ExportSelection> selection) throws IOException {
         final Map<String, Object> root = new LinkedHashMap<>();
         root.put("schema", SCHEMA);
         root.put("createdAt", Instant.now().toString());
@@ -612,6 +653,12 @@ public final class ManualRoiExportService {
             row.put("parts", roi.parts());
             roiRows.add(row);
         }
+        root.put("exportSelection", selection.map(value -> Map.of(
+                "sourceChannelsOneBased", value.channels(), "sourceSliceOneBased", value.slice(),
+                "sourceFrameOneBased", value.frame(), "outputSizeC", value.channels().size(),
+                "outputSizeZ", 1, "outputSizeT", 1)).orElse(null));
+        root.put("scope", selection.isPresent() ? "selected-channels-pinned-plane" : "legacy-all-czt");
+        root.put("maskedMeasurementNote", "Zero-filled masked images still require the binary mask for quantitative measurements.");
         root.put("sections", List.of(Map.of(
                 "id", sectionId,
                 "rois", roiRows)));

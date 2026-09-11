@@ -30,6 +30,30 @@ class SwingReviewPanelSetupLayoutTest {
                                 <= scroll.getViewport().getExtentSize().width,
                         "Step 0 controls overflow horizontally at " + size);
             }
+            final var numeric = (JToggleButton) named(panel, "showNumericAdjustments");
+            numeric.doClick();
+            for (final Dimension size : List.of(new Dimension(800, 560), new Dimension(1280, 800))) {
+                panel.setSize(size);
+                for (int pass = 0; pass < 8; pass++) layout(panel);
+                final var numbers = (JPanel) named(panel, "numericPlacementFields");
+                assertTrue(numbers.isVisible());
+                assertTrue(numbers.getHeight() >= numbers.getPreferredSize().height,
+                        "Expanded numeric controls must receive their full preferred height: actual=" + numbers.getSize() + " preferred=" + numbers.getPreferredSize() + " parent=" + numbers.getParent().getSize() + " parentPreferred=" + numbers.getParent().getPreferredSize());
+                final var precision = numbers.getParent();
+                assertTrue(numbers.getY() + numbers.getHeight() <= precision.getHeight(), "Numeric fields must fit within their visible parent");
+                for (final String name : List.of("placementMove", "placementRotate", "placementScale", "moveSourceX", "moveSourceY", "rotateDegrees", "scaleWidthPercent", "scaleHeightPercent")) {
+                    final var control = named(panel, name);
+                    final var bounds = SwingUtilities.convertRectangle(control.getParent(), control.getBounds(), scroll.getViewport().getView());
+                    assertTrue(bounds.width > 0 && bounds.height > 0, name + " must be laid out");
+                    assertTrue(bounds.x >= 0 && bounds.x + bounds.width <= scroll.getViewport().getExtentSize().width,
+                            name + " must fit the inspector width when expanded at " + size);
+                }
+                final var primary = named(panel, "persistentStagePrimary");
+                final var actionBounds = SwingUtilities.convertRectangle(primary.getParent(), primary.getBounds(), panel);
+                assertTrue(actionBounds.y >= 0 && actionBounds.y + actionBounds.height <= size.height,
+                        "Primary action must stay inside the fixed footer");
+            }
+            numeric.doClick();
             final long revision = session.state().contentRevision();
             final var crop = (JCheckBox) named(panel, "showTissueCropControls");
             crop.doClick();

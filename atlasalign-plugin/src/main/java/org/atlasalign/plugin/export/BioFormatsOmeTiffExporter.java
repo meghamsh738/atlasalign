@@ -22,6 +22,7 @@ import ome.xml.model.enums.DimensionOrder;
 import ome.xml.model.enums.PixelType;
 import ome.xml.model.primitives.NonNegativeInteger;
 import ome.xml.model.primitives.PositiveInteger;
+import org.atlasalign.application.export.ExportSelection;
 import org.atlasalign.application.export.SourcePixelReader;
 import org.atlasalign.core.CalibrationFieldStatus;
 import org.atlasalign.core.CalibrationMetadata;
@@ -76,6 +77,7 @@ public final class BioFormatsOmeTiffExporter {
         return version;
     }
 
+    /** Historical overload: exports every source C/Z/T plane. */
     public WriteReport writeSourceCrop(
             final Path destination,
             final String imageName,
@@ -83,64 +85,27 @@ public final class BioFormatsOmeTiffExporter {
             final SourceRegionFootprint footprint,
             final BooleanSupplier cancelled,
             final DoubleConsumer progress) {
-        final String version = verifyRuntimeVersion();
-        final Path output = Objects.requireNonNull(
-                destination, "destination").toAbsolutePath().normalize();
-        final SourcePixelReader source = Objects.requireNonNull(
-                reader, "reader");
-        final SourceRegionFootprint region = Objects.requireNonNull(
-                footprint, "footprint");
-        final SourceImageMetadata metadata = source.snapshot().metadata();
-        requireMatchingSourceDimensions(metadata, region);
-        final long planes = Math.multiplyExact(
-                (long) metadata.channels(),
-                Math.multiplyExact((long) metadata.slices(),
-                        metadata.frames()));
-        final long estimated = Math.multiplyExact(
-                Math.multiplyExact((long) region.bounds().pixelCount(),
-                        bytesPerPixel(metadata.bitDepth())), planes);
-        final boolean bigTiff = requiresBigTiff(estimated);
-        final List<String> warnings = new ArrayList<>();
-        final IMetadata ome = sourceMetadata(
-                Objects.requireNonNull(imageName, "imageName"), metadata,
-                region, warnings, "raw-source-crop", false);
+        return writeCrop(destination, imageName, reader, footprint,
+                null, false, cancelled, progress);
+    }
 
-        try (OMETiffWriter writer = configuredWriter(
-                output, ome, bigTiff)) {
-            final int totalPlanes = Math.toIntExact(planes);
-            int planeIndex = 0;
-            for (int frame = 1; frame <= metadata.frames(); frame++) {
-                for (int slice = 1; slice <= metadata.slices(); slice++) {
-                    for (int channel = 1;
-                            channel <= metadata.channels(); channel++) {
-                        checkCancelled(cancelled);
-                        final SourcePixelReader.PixelBlock block =
-                                source.readPlane(channel, slice, frame,
-                                        region.bounds());
-                        if (block.bitDepth() != metadata.bitDepth()) {
-                            throw new IllegalStateException(
-                                    "Source pixel type changed during export");
-                        }
-                        requireMatchingBlockDimensions(
-                                block, region.bounds());
-                        writer.saveBytes(planeIndex,
-                                littleEndianBytes(block));
-                        planeIndex++;
-                        progress.accept((double) planeIndex / totalPlanes);
-                    }
-                }
-            }
-        } catch (final FormatException | IOException error) {
-            throw new IllegalStateException(
-                    "Could not write lossless OME-TIFF "
-                            + output.getFileName(), error);
-        }
-        return new WriteReport(version, bigTiff, warnings);
+    /** Exports the chosen source channels at one source Z/T as output C/1/1. */
+    public WriteReport writeSourceCrop(
+            final Path destination,
+            final String imageName,
+            final SourcePixelReader reader,
+            final SourceRegionFootprint footprint,
+            final ExportSelection selection,
+            final BooleanSupplier cancelled,
+            final DoubleConsumer progress) {
+        return writeCrop(destination, imageName, reader, footprint,
+                Objects.requireNonNull(selection, "selection"), false,
+                cancelled, progress);
     }
 
     /**
-     * Writes a derived C/Z/T-preserving crop whose ROI pixels are exact source
-     * values and whose non-ROI pixels are numeric positive zero.
+     * Historical overload: writes a derived C/Z/T-preserving crop whose ROI
+     * pixels are exact source values and non-ROI pixels are positive zero.
      */
     public WriteReport writeMaskedSourceCrop(
             final Path destination,
@@ -149,6 +114,33 @@ public final class BioFormatsOmeTiffExporter {
             final SourceRegionFootprint footprint,
             final BooleanSupplier cancelled,
             final DoubleConsumer progress) {
+        return writeCrop(destination, imageName, reader, footprint,
+                null, true, cancelled, progress);
+    }
+
+    /** Exports a derived masked crop of the chosen source C/Z/T plane. */
+    public WriteReport writeMaskedSourceCrop(
+            final Path destination,
+            final String imageName,
+            final SourcePixelReader reader,
+            final SourceRegionFootprint footprint,
+            final ExportSelection selection,
+            final BooleanSupplier cancelled,
+            final DoubleConsumer progress) {
+        return writeCrop(destination, imageName, reader, footprint,
+                Objects.requireNonNull(selection, "selection"), true,
+                cancelled, progress);
+    }
+
+    private WriteReport writeCrop(
+            final Path destination,
+            final String imageName,
+            final SourcePixelReader reader,
+            final SourceRegionFootprint footprint,
+            final ExportSelection selection,
+            final boolean masked,
+            final BooleanSupplier cancelled,
+            final DoubleConsumer progress) {
         final String version = verifyRuntimeVersion();
         final Path output = Objects.requireNonNull(
                 destination, "destination").toAbsolutePath().normalize();
@@ -158,10 +150,22 @@ public final class BioFormatsOmeTiffExporter {
                 footprint, "footprint");
         final SourceImageMetadata metadata = source.snapshot().metadata();
         requireMatchingSourceDimensions(metadata, region);
-        final long planes = Math.multiplyExact(
-                (long) metadata.channels(),
-                Math.multiplyExact((long) metadata.slices(),
-                        metadata.frames()));
+        if (selection != null) {
+            selection.validateAgainst(metadata);
+        }
+        Objects.requireNonNull(progress, "progress");
+        checkCancelled(cancelled);
+        final List<Integer> channels = selection == null
+                ? java.util.stream.IntStream.rangeClosed(1, metadata.channels())
+                        .boxed().toList()
+                : selection.channels();
+        final int firstSlice = selection == null ? 1 : selection.slice();
+        final int lastSlice = selection == null ? metadata.slices() : firstSlice;
+        final int firstFrame = selection == null ? 1 : selection.frame();
+        final int lastFrame = selection == null ? metadata.frames() : firstFrame;
+        final long planes = Math.multiplyExact((long) channels.size(),
+                Math.multiplyExact((long) lastSlice - firstSlice + 1,
+                        (long) lastFrame - firstFrame + 1));
         final long estimated = Math.multiplyExact(
                 Math.multiplyExact((long) region.bounds().pixelCount(),
                         bytesPerPixel(metadata.bitDepth())), planes);
@@ -169,17 +173,16 @@ public final class BioFormatsOmeTiffExporter {
         final List<String> warnings = new ArrayList<>();
         final IMetadata ome = sourceMetadata(
                 Objects.requireNonNull(imageName, "imageName"), metadata,
-                region, warnings, "masked-source-crop", true);
-        final BitSet mask = region.cropMask();
+                region, warnings, masked ? "masked-source-crop" : "raw-source-crop",
+                masked, selection);
+        final BitSet mask = masked ? region.cropMask() : null;
 
-        try (OMETiffWriter writer = configuredWriter(
-                output, ome, bigTiff)) {
+        try (OMETiffWriter writer = configuredWriter(output, ome, bigTiff)) {
             final int totalPlanes = Math.toIntExact(planes);
             int planeIndex = 0;
-            for (int frame = 1; frame <= metadata.frames(); frame++) {
-                for (int slice = 1; slice <= metadata.slices(); slice++) {
-                    for (int channel = 1;
-                            channel <= metadata.channels(); channel++) {
+            for (int frame = firstFrame; frame <= lastFrame; frame++) {
+                for (int slice = firstSlice; slice <= lastSlice; slice++) {
+                    for (final int channel : channels) {
                         checkCancelled(cancelled);
                         final SourcePixelReader.PixelBlock block =
                                 source.readPlane(channel, slice, frame,
@@ -188,10 +191,9 @@ public final class BioFormatsOmeTiffExporter {
                             throw new IllegalStateException(
                                     "Source pixel type changed during export");
                         }
-                        requireMatchingBlockDimensions(
-                                block, region.bounds());
-                        writer.saveBytes(planeIndex,
-                                littleEndianBytes(maskedBlock(block, mask)));
+                        requireMatchingBlockDimensions(block, region.bounds());
+                        writer.saveBytes(planeIndex, littleEndianBytes(
+                                masked ? maskedBlock(block, mask) : block));
                         planeIndex++;
                         progress.accept((double) planeIndex / totalPlanes);
                     }
@@ -199,8 +201,8 @@ public final class BioFormatsOmeTiffExporter {
             }
         } catch (final FormatException | IOException error) {
             throw new IllegalStateException(
-                    "Could not write derived masked OME-TIFF "
-                            + output.getFileName(), error);
+                    "Could not write " + (masked ? "derived masked" : "lossless")
+                            + " OME-TIFF " + output.getFileName(), error);
         }
         return new WriteReport(version, bigTiff, warnings);
     }
@@ -319,15 +321,21 @@ public final class BioFormatsOmeTiffExporter {
             final SourceRegionFootprint footprint,
             final List<String> warnings,
             final String artifactKind,
-            final boolean derived) {
+            final boolean derived,
+            final ExportSelection selection) {
         final IMetadata metadata = MetadataTools.createOMEXMLMetadata();
+        final int channelCount = selection == null
+                ? source.channels() : selection.channels().size();
         populatePixels(metadata, imageName, footprint.bounds().width(),
-                footprint.bounds().height(), source.channels(),
-                source.slices(), source.frames(),
+                footprint.bounds().height(), channelCount,
+                selection == null ? source.slices() : 1,
+                selection == null ? source.frames() : 1,
                 pixelType(source.bitDepth()));
-        for (int channel = 0; channel < source.channels(); channel++) {
+        for (int channel = 0; channel < channelCount; channel++) {
+            final int sourceChannel = selection == null
+                    ? channel : selection.channels().get(channel) - 1;
             metadata.setChannelID("Channel:0:" + channel, 0, channel);
-            metadata.setChannelName(source.channelLabels().get(channel),
+            metadata.setChannelName(source.channelLabels().get(sourceChannel),
                     0, channel);
             metadata.setChannelSamplesPerPixel(new PositiveInteger(1),
                     0, channel);
@@ -350,9 +358,16 @@ public final class BioFormatsOmeTiffExporter {
             values.add(new MapPair("atlasalign.insideRegionPixels",
                     "exact-source-values"));
         }
-        for (int index = 0;
-                index < source.stackPlaneLabels().size(); index++) {
-            final StackPlaneLabel label = source.stackPlaneLabels().get(index);
+        if (selection != null) {
+            addSelectionMetadata(metadata, source, selection, values);
+        }
+        final int planeCount = selection == null
+                ? source.stackPlaneLabels().size() : channelCount;
+        for (int index = 0; index < planeCount; index++) {
+            final int sourcePlane = selection == null ? index
+                    : sourcePlaneIndex(source, selection.channels().get(index),
+                            selection.slice(), selection.frame());
+            final StackPlaneLabel label = source.stackPlaneLabels().get(sourcePlane);
             values.add(new MapPair("imagej.planeLabel." + index
                     + ".present", Boolean.toString(label.present())));
             values.add(new MapPair("imagej.planeLabel." + index
@@ -364,6 +379,52 @@ public final class BioFormatsOmeTiffExporter {
         metadata.setMapAnnotationValue(values, 0);
         metadata.setImageAnnotationRef("Annotation:0", 0, 0);
         return metadata;
+    }
+
+    private static void addSelectionMetadata(
+            final IMetadata metadata,
+            final SourceImageMetadata source,
+            final ExportSelection selection,
+            final List<MapPair> values) {
+        values.add(new MapPair("atlasalign.exportScope", "selected-source-plane"));
+        values.add(new MapPair("atlasalign.sourceIndexBase", "1"));
+        values.add(new MapPair("atlasalign.outputIndexBase", "0"));
+        values.add(new MapPair("atlasalign.sourceSizeC", Integer.toString(source.channels())));
+        values.add(new MapPair("atlasalign.sourceSizeZ", Integer.toString(source.slices())));
+        values.add(new MapPair("atlasalign.sourceSizeT", Integer.toString(source.frames())));
+        values.add(new MapPair("atlasalign.sourceChannels", selection.channels().stream()
+                .map(String::valueOf).collect(java.util.stream.Collectors.joining(","))));
+        values.add(new MapPair("atlasalign.sourceSlice", Integer.toString(selection.slice())));
+        values.add(new MapPair("atlasalign.sourceFrame", Integer.toString(selection.frame())));
+        final Length spacingZ = metadata.getPixelsPhysicalSizeZ(0);
+        final Time interval = metadata.getPixelsTimeIncrement(0);
+        for (int outputPlane = 0; outputPlane < selection.channels().size(); outputPlane++) {
+            final int sourceChannel = selection.channels().get(outputPlane);
+            final String prefix = "atlasalign.outputPlane." + outputPlane + ".";
+            values.add(new MapPair(prefix + "sourceChannel", Integer.toString(sourceChannel)));
+            values.add(new MapPair(prefix + "sourceSlice", Integer.toString(selection.slice())));
+            values.add(new MapPair(prefix + "sourceFrame", Integer.toString(selection.frame())));
+            values.add(new MapPair(prefix + "sourceStackIndex", Integer.toString(
+                    sourcePlaneIndex(source, sourceChannel,
+                            selection.slice(), selection.frame()) + 1)));
+            if (spacingZ != null) {
+                metadata.setPlanePositionZ(new Length(
+                        (selection.slice() - 1) * spacingZ.value().doubleValue(),
+                        spacingZ.unit()), 0, outputPlane);
+            }
+            if (interval != null) {
+                metadata.setPlaneDeltaT(new Time(
+                        (selection.frame() - 1) * interval.value().doubleValue(),
+                        interval.unit()), 0, outputPlane);
+            }
+        }
+    }
+
+    /** ImageJ source stack order, with a zero-based returned index. */
+    private static int sourcePlaneIndex(final SourceImageMetadata source,
+            final int channel, final int slice, final int frame) {
+        return Math.toIntExact(((long) (frame - 1) * source.slices() + slice - 1)
+                * source.channels() + channel - 1);
     }
 
     private static IMetadata maskMetadata(

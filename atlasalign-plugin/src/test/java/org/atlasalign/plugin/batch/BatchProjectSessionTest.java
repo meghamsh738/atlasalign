@@ -38,7 +38,8 @@ class BatchProjectSessionTest {
         assertEquals("Anterior", project.items().get(1).section().name());
         final var json = new ObjectMapper().readTree(
                 project.projectFile().toFile());
-        assertEquals(BatchProjectSession.SCHEMA,
+        assertEquals("batch-project-v2.json", project.projectFile().getFileName().toString());
+        assertEquals("atlasalign-review-batch-v2",
                 json.path("schema").asText());
         assertEquals("two", json.path("sections").get(0)
                 .path("id").asText());

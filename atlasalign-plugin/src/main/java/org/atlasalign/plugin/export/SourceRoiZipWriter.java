@@ -31,10 +31,41 @@ public final class SourceRoiZipWriter {
                 .map(name -> safeToken(name) + ".roi").toList());
     }
 
+    /** Pins source-coordinate ROIs to one Z/T plane, with C=0 for all channels. */
+    public void write(
+            final Path destination,
+            final List<SourceRegionFootprint> footprints,
+            final int oneBasedSlice,
+            final int oneBasedFrame) {
+        final var checked = List.copyOf(Objects.requireNonNull(footprints, "footprints"));
+        write(destination, checked, checked.stream()
+                .map(SourceRoiZipWriter::displayName)
+                .map(name -> safeToken(name) + ".roi").toList(),
+                oneBasedSlice, oneBasedFrame);
+    }
+
     /** Entry names may carry stable identity while embedded ROI names stay readable. */
     public void write(final Path destination,
             final List<SourceRegionFootprint> footprints,
             final List<String> entryNames) {
+        writePositioned(destination, footprints, entryNames, 0, 0);
+    }
+
+    /** Pins source-coordinate ROIs to the selected source Z/T plane. */
+    public void write(final Path destination,
+            final List<SourceRegionFootprint> footprints,
+            final List<String> entryNames,
+            final int oneBasedSlice,
+            final int oneBasedFrame) {
+        requirePlane(oneBasedSlice, oneBasedFrame);
+        writePositioned(destination, footprints, entryNames,
+                oneBasedSlice, oneBasedFrame);
+    }
+
+    private void writePositioned(final Path destination,
+            final List<SourceRegionFootprint> footprints,
+            final List<String> entryNames,
+            final int slice, final int frame) {
         final var checked = List.copyOf(footprints);
         final var names = List.copyOf(entryNames);
         if (checked.isEmpty() || names.size() != checked.size()) {
@@ -54,6 +85,9 @@ public final class SourceRoiZipWriter {
                 final String name = displayName(footprint);
                 final ShapeRoi roi = new ShapeRoi(sourceArea(footprint));
                 roi.setName(name);
+                if (slice > 0) {
+                    roi.setPosition(0, slice, frame);
+                }
                 zip.putNextEntry(new ZipEntry(names.get(index)));
                 zip.write(RoiEncoder.saveAsByteArray(roi));
                 zip.closeEntry();
@@ -71,6 +105,35 @@ public final class SourceRoiZipWriter {
             final SourceRegionFootprint footprint,
             final int sourceOffsetX,
             final int sourceOffsetY) {
+        writeSinglePositioned(destination, roiName, footprint,
+                sourceOffsetX, sourceOffsetY, 0, 0);
+    }
+
+    /**
+     * Writes an ROI with C=0 and explicit positive Z/T positions. Use selected
+     * source Z/T for source coordinates, or Z=1/T=1 for a crop-local C/1/1 image.
+     */
+    public void writeSingle(
+            final Path destination,
+            final String roiName,
+            final SourceRegionFootprint footprint,
+            final int sourceOffsetX,
+            final int sourceOffsetY,
+            final int oneBasedSlice,
+            final int oneBasedFrame) {
+        requirePlane(oneBasedSlice, oneBasedFrame);
+        writeSinglePositioned(destination, roiName, footprint,
+                sourceOffsetX, sourceOffsetY, oneBasedSlice, oneBasedFrame);
+    }
+
+    private void writeSinglePositioned(
+            final Path destination,
+            final String roiName,
+            final SourceRegionFootprint footprint,
+            final int sourceOffsetX,
+            final int sourceOffsetY,
+            final int slice,
+            final int frame) {
         final String name = Objects.requireNonNull(roiName, "roiName").trim();
         if (name.isEmpty()) {
             throw new IllegalArgumentException("ROI name must not be blank");
@@ -85,12 +148,21 @@ public final class SourceRoiZipWriter {
                 ZipOutputStream zip = new ZipOutputStream(output)) {
             final ShapeRoi roi = new ShapeRoi(area);
             roi.setName(name);
+            if (slice > 0) {
+                roi.setPosition(0, slice, frame);
+            }
             zip.putNextEntry(new ZipEntry(safeToken(name) + ".roi"));
             zip.write(RoiEncoder.saveAsByteArray(roi));
             zip.closeEntry();
         } catch (final IOException error) {
             throw new IllegalStateException(
                     "Could not write Fiji ROI ZIP", error);
+        }
+    }
+
+    private static void requirePlane(final int slice, final int frame) {
+        if (slice <= 0 || frame <= 0) {
+            throw new IllegalArgumentException("ROI slice and frame must be positive");
         }
     }
 

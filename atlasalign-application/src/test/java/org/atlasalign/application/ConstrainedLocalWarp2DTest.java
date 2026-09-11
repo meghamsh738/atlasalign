@@ -16,6 +16,26 @@ class ConstrainedLocalWarp2DTest {
     private static final double TOLERANCE = 1e-9;
 
     @Test
+    void storedCoefficientsRestoreExactlyAndCorruptionFails() {
+        final List<Point2D> sources = square(30, 30, 80, 80);
+        final var warp = ConstrainedLocalWarp2D.fit(sources, List.of(new Point2D(34, 32),
+                sources.get(1), sources.get(2), sources.get(3)), 200, 200);
+        final var restored = ConstrainedLocalWarp2D.restore(warp.snapshot());
+        assertEquals(warp, restored);
+        for (int y = 10; y < 190; y += 13) for (int x = 10; x < 190; x += 11) {
+            final var point = new Point2D(x + .25, y + .75);
+            assertEquals(warp.apply(point), restored.apply(point));
+            assertEquals(warp.inverse(point), restored.inverse(point));
+        }
+        final var value = warp.snapshot();
+        final var weights = new ArrayList<>(value.xWeights()); weights.set(0, weights.get(0) + .1);
+        assertThrows(IllegalArgumentException.class, () -> ConstrainedLocalWarp2D.restore(
+                new ConstrainedLocalWarp2D.Snapshot(value.algorithmRevision(), 200, 200,
+                        value.sourcePoints(), value.targetPoints(), weights, value.yWeights(),
+                        value.supportRadius(), value.diagnostics())));
+    }
+
+    @Test
     void identityFitIsExactAndReportsIdentitySafety() {
         final List<Point2D> sources = square(20, 20, 80, 80);
 

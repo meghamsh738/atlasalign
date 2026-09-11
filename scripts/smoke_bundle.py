@@ -16,7 +16,7 @@ import org.atlasalign.plugin.ui.PluginBranding;
 public class BundleSmoke {
     public static void main(String[] args) {
         if (!"allen_mouse_25um".equals(AtlasManifests.allenMouse25um().atlasId())) throw new AssertionError("manifest");
-        if (!"0.1.0-beta.1".equals(PluginBranding.version())) throw new AssertionError("version");
+        if (!"0.1.0-beta.3".equals(PluginBranding.version())) throw new AssertionError("version");
         if (!PluginBranding.aboutText().contains("Made by Meghamsh Teja Konda")) throw new AssertionError("credit");
         System.out.println("Packaged atlas/Jackson/branding loaded on " + System.getProperty("os.name") + " / Java " + System.getProperty("java.version"));
     }

@@ -96,14 +96,14 @@ class SwingReviewWindowTest {
             final JButton pan = new JButton("Pan");
             final AtomicInteger movement = new AtomicInteger();
             final KeyEvent left = new KeyEvent(pan,
-                    KeyEvent.KEY_PRESSED, 1L, 0, KeyEvent.VK_LEFT,
+                    KeyEvent.KEY_PRESSED, 1L, 0, KeyEvent.VK_PAGE_UP,
                     KeyEvent.CHAR_UNDEFINED);
             final KeyEvent right = new KeyEvent(pan,
-                    KeyEvent.KEY_PRESSED, 2L, 0, KeyEvent.VK_RIGHT,
+                    KeyEvent.KEY_PRESSED, 2L, 0, KeyEvent.VK_PAGE_DOWN,
                     KeyEvent.CHAR_UNDEFINED);
             final KeyEvent modified = new KeyEvent(pan,
                     KeyEvent.KEY_PRESSED, 3L, KeyEvent.SHIFT_DOWN_MASK,
-                    KeyEvent.VK_RIGHT, KeyEvent.CHAR_UNDEFINED);
+                    KeyEvent.VK_PAGE_DOWN, KeyEvent.CHAR_UNDEFINED);
 
             assertEquals(true, SwingReviewWindow.dispatchPlaneNavigation(
                     left, true, pan, movement::addAndGet));
@@ -140,12 +140,15 @@ class SwingReviewWindowTest {
             SwingReviewWindow.installPlaneNavigation(
                     root, focus::get, movement::addAndGet);
 
+            for (final int arrow : new int[]{KeyEvent.VK_LEFT, KeyEvent.VK_RIGHT, KeyEvent.VK_UP, KeyEvent.VK_DOWN}) {
+                assertEquals(null, root.getInputMap(JComponent.WHEN_IN_FOCUSED_WINDOW).get(KeyStroke.getKeyStroke(arrow, 0)));
+            }
             final Object previous = root.getInputMap(
                     JComponent.WHEN_IN_FOCUSED_WINDOW).get(
-                            KeyStroke.getKeyStroke(KeyEvent.VK_LEFT, 0));
+                            KeyStroke.getKeyStroke(KeyEvent.VK_PAGE_UP, 0));
             final Object next = root.getInputMap(
                     JComponent.WHEN_IN_FOCUSED_WINDOW).get(
-                            KeyStroke.getKeyStroke(KeyEvent.VK_RIGHT, 0));
+                            KeyStroke.getKeyStroke(KeyEvent.VK_PAGE_DOWN, 0));
             root.getActionMap().get(previous).actionPerformed(null);
             root.getActionMap().get(next).actionPerformed(null);
             assertEquals(0, movement.get());
@@ -156,7 +159,7 @@ class SwingReviewWindowTest {
             assertEquals(null, root.getInputMap(
                     JComponent.WHEN_IN_FOCUSED_WINDOW).get(
                             KeyStroke.getKeyStroke(
-                                    KeyEvent.VK_RIGHT,
+                                    KeyEvent.VK_PAGE_DOWN,
                                     KeyEvent.SHIFT_DOWN_MASK)));
         });
     }

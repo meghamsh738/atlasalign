@@ -315,10 +315,20 @@ public final class SwingReviewPanel extends JPanel
     private final JButton toolbarSkip = new JButton("Skip step");
     private final JButton toolbarAccept = new JButton("Atlas Accept");
     private final JCheckBox showPointLabels = new JCheckBox("Point labels");
+    private final JCheckBox outerBoundaries = new JCheckBox("Outer atlas boundary only", true);
+    private final JCheckBox lockAspectRatio = new JCheckBox("Lock proportions", true);
+    private final JPanel precisionControls = new JPanel() {
+        @Override public Dimension getMaximumSize() { return new Dimension(Integer.MAX_VALUE, getPreferredSize().height); }
+    };
+    private final JButton stagePrimary = new JButton("Continue");
+    private final JLabel reviewStates = new JLabel();
+    private final JLabel overlayLegend = new JLabel();
+    private ReviewController.CompletedExport lastExport;
+    private JPanel landmarkControls;
     private final JCheckBox showDeformationGrid = new JCheckBox("Warp grid");
     private final JCheckBox showDisplacementLines = new JCheckBox(
             "Displacement lines", true);
-    private final JCheckBox tissueClipping = new JCheckBox("Tissue clipping");
+    private final JCheckBox tissueClipping = new JCheckBox("Clip atlas to tissue");
     private final JCheckBoxMenuItem editTissueCrop =
             new JCheckBoxMenuItem("Edit tissue crop");
     private final JButton viewOptions = new JButton("View ▾");
@@ -354,6 +364,8 @@ public final class SwingReviewPanel extends JPanel
     private JScrollPane landmarkTableScroll;
     private JScrollPane automaticProvenanceScroll;
     private ReviewViewModel latestModel;
+    private boolean displayGeometryBlocked;
+    private final java.util.Map<JComponent, Boolean> displayEnabledStates = new java.util.IdentityHashMap<>();
     private final CardLayout workflowCards = new CardLayout();
     private final JPanel workflowSurface = new JPanel(workflowCards);
     private final CardLayout inspectorCards = new CardLayout();
@@ -774,8 +786,14 @@ public final class SwingReviewPanel extends JPanel
                 this.manualRoiSession, manualRoiMapping, canvas,
                 this.manualRoiExportService, this.sourceName,
                 this::defaultManualRoiSide);
+        manualRoiEditor.setImageScopeController(controller);
+        manualRoiEditor.addPropertyChangeListener("exportRunning", event -> updateStagePrimary());
         this.manualRoiSession.addListener(() -> SwingUtilities.invokeLater(
-                this::refreshManualRoiSummary));
+                () -> { refreshManualRoiSummary(); updateReviewStates(); updateStagePrimary(); }));
+        controller.addExportListener(event -> SwingUtilities.invokeLater(() -> {
+            lastExport = event; updateReviewStates();
+        }));
+        controller.addProjectChangeListener(() -> SwingUtilities.invokeLater(this::updateReviewStates));
         final JComponent controls = buildControls();
         controls.setPreferredSize(new Dimension(
                 INSPECTOR_PREFERRED_WIDTH, 650));
@@ -851,6 +869,67 @@ public final class SwingReviewPanel extends JPanel
         return canvas;
     }
 
+    public void setDisplayGeometryBlocked(final boolean blocked) {
+        restoreDisplayControlStates();
+        displayGeometryBlocked = blocked;
+        manualRoiEditor.setDisplayGeometryBlocked(blocked);
+        if (exportPanel != null) exportPanel.setDisplayGeometryBlocked(blocked);
+        if (blocked) disableGeometryControls(this);
+        else if (latestModel != null) render(latestModel);
+    }
+
+    public JComponent projectViewControls() { return viewPopup; }
+
+    private void restoreDisplayControlStates() {
+        displayEnabledStates.forEach(JComponent::setEnabled); displayEnabledStates.clear();
+    }
+
+    private void disableGeometryControls(final Component component) {
+        if (component instanceof JComponent displayOnly && Boolean.TRUE.equals(displayOnly.getClientProperty("displayOnlyControl"))) return;
+        if (component instanceof javax.swing.AbstractButton || component instanceof JComboBox<?>
+                || component instanceof JSpinner || component instanceof JSlider || component instanceof javax.swing.text.JTextComponent) {
+            final JComponent control = (JComponent) component;
+            displayEnabledStates.put(control, control.isEnabled()); control.setEnabled(false);
+        }
+        if (component instanceof java.awt.Container container) for (Component child : container.getComponents()) disableGeometryControls(child);
+    }
+
+    public org.atlasalign.plugin.project.ReviewUiState captureProjectUi() {
+        return new org.atlasalign.plugin.project.ReviewUiState(workflowStage, canvas.interactionTool(),
+                canvas.comparisonMode(), canvas.viewport(), canvas.landmarkLabelsVisible(),
+                canvas.deformationGridVisible(), canvas.displacementLinesVisible(), canvas.singleTissuePane(),
+                canvas.selectedRegionColor().getRGB(), canvas.dimRegionColor().getRGB(), canvas.regionStrokeWidth(),
+                canvas.overlayOpacity(), canvas.aspectRatioLocked(), canvas.outerBoundariesOnly(),
+                canvas.activeHemisphereSide(), controller.selectedRegionId(), controller.showAtlasAnatomy(), canvas.placementTool());
+    }
+
+    public void restoreProjectUi(final org.atlasalign.plugin.project.ReviewUiState saved) {
+        setWorkflowStage(saved.stage());
+        canvas.setInteractionTool(saved.tool()); canvas.setComparisonMode(saved.comparison());
+        landmarkControls.setVisible(saved.stage() == ReviewWorkflowStage.INTERIOR && saved.tool() == ReviewCanvas.InteractionTool.LANDMARKS);
+        panTool.setSelected(saved.tool() == ReviewCanvas.InteractionTool.PAN);
+        transformTool.setSelected(saved.tool() == ReviewCanvas.InteractionTool.TRANSFORM);
+        borderTool.setSelected(saved.tool() == ReviewCanvas.InteractionTool.BORDER);
+        pointsTool.setSelected(saved.tool() == ReviewCanvas.InteractionTool.POINTS || saved.tool() == ReviewCanvas.InteractionTool.LANDMARKS);
+        canvas.setLandmarkLabelsVisible(saved.landmarkLabels());
+        canvas.setDeformationGridVisible(saved.deformationGrid()); canvas.setDisplacementLinesVisible(saved.displacementLines());
+        canvas.setSingleTissuePane(saved.singleTissuePane());
+        canvas.setRegionStyle(new Color(saved.selectedGuideArgb(), true), new Color(saved.dimGuideArgb(), true), saved.regionStrokeWidth());
+        canvas.setOverlayOpacity(saved.overlayOpacity()); canvas.setAspectRatioLocked(saved.aspectRatioLocked());
+        canvas.setOuterBoundariesOnly(saved.outerBoundariesOnly()); canvas.setActiveHemisphereSide(saved.activeSide());
+        canvas.setPlacementTool(saved.placementTool()); lockAspectRatio.setSelected(saved.aspectRatioLocked()); outerBoundaries.setSelected(saved.outerBoundariesOnly());
+        showPointLabels.setSelected(saved.landmarkLabels()); showDeformationGrid.setSelected(saved.deformationGrid());
+        showDisplacementLines.setSelected(saved.displacementLines()); overlayOpacity.setValue((int) Math.round(saved.overlayOpacity() * 100));
+        guideThickness.setValue(saved.regionStrokeWidth());
+        activeAtlasLeft.setSelected(saved.activeSide() == ManualHemisphereWarp2D.AtlasSide.LEFT);
+        activeAtlasRight.setSelected(saved.activeSide() == ManualHemisphereWarp2D.AtlasSide.RIGHT);
+        showBefore.setSelected(saved.comparison() == ReviewCanvas.ComparisonMode.BEFORE);
+        showAfter.setSelected(saved.comparison() == ReviewCanvas.ComparisonMode.AFTER);
+        showCompare.setSelected(saved.comparison() == ReviewCanvas.ComparisonMode.COMPARE);
+        controller.restoreSelectedRegion(saved.selectedRegionId()); controller.setShowAtlasAnatomy(saved.showAtlasAnatomy());
+        canvas.restoreViewport(saved.viewport());
+    }
+
     String landmarkCaptureStatusTextForTests() {
         return landmarkCaptureStatus.getText();
     }
@@ -876,6 +955,7 @@ public final class SwingReviewPanel extends JPanel
 
     @Override
     public void render(final ReviewViewModel model) {
+        restoreDisplayControlStates();
         updating = true;
         try {
             latestModel = model;
@@ -1133,7 +1213,7 @@ public final class SwingReviewPanel extends JPanel
                 pointsTool.setSelected(true);
                 canvas.setInteractionTool(ReviewCanvas.InteractionTool.POINTS);
             } else if (!deformingWarp
-                    && workflowStage == ReviewWorkflowStage.SETUP_AND_PLANE
+                    && workflowStage == ReviewWorkflowStage.SETUP_AND_PLANE && !panTool.isSelected()
                     && !boundaryFitEditing && !boundaryWarpEditing) {
                 transformTool.setSelected(true);
                 canvas.setInteractionTool(
@@ -1174,12 +1254,17 @@ public final class SwingReviewPanel extends JPanel
                     .map(value -> "Atlas load: " + value)
                     .orElse(" "));
             manualRoiEditor.refreshExportReadiness();
+            setEnabledRecursively(precisionControls, canvas.precisionEditingAvailable());
+            precisionControls.setToolTipText(canvas.precisionEditingAvailable() ? "Each Apply is one undoable change; distances use source pixels"
+                    : "Placement controls require an editable coarse placement; undo or clear local refinement to return to Setup");
+            updateStagePrimary(); updateReviewStates();
             compactStatus.setText(compactStatusText(model));
             compactStatus.setToolTipText(hemisphereWarp
                     ? hemisphereWarpStatusText(model)
                     : "Reviewer controls are manual geometry and never automatic evidence.");
         } finally {
             updating = false;
+            if (displayGeometryBlocked) disableGeometryControls(this);
         }
     }
 
@@ -1551,8 +1636,8 @@ public final class SwingReviewPanel extends JPanel
 
         final JPanel setup = scrollableVerticalPanel();
         setup.add(section("Place the atlas",
-                wrappedLabel("Drag the orange atlas to move it. Use square handles to resize; the round handle rotates."),
-                makeAtlasUpright));
+                wrappedLabel("Choose a tool or drag the atlas and its handles."),
+                precisionPlacementControls(), makeAtlasUpright));
         makeAtlasUpright.setName("makeAtlasUpright");
         makeAtlasUpright.setToolTipText(
                 "Remove rotation and skew while keeping the atlas centre and size. Use Atlas Undo to restore.");
@@ -1583,6 +1668,7 @@ public final class SwingReviewPanel extends JPanel
         cropDisclosure.setToolTipText(
                 "Optional: adjust the cyan tissue boundary. This does not move the orange atlas.");
         final JPanel tissueCropControls = section("Tissue crop",
+                wrappedLabel("Drag cyan boundary points to include missed tissue. Turn off Clip atlas to tissue to show the full aligned atlas without changing its placement."),
                 actionGrid(resuggestBoundary, drawTissueCrop,
                         finishTissueCrop, cancelTissueCropDraw),
                 tissueCropDrawStatus);
@@ -1593,6 +1679,10 @@ public final class SwingReviewPanel extends JPanel
                 cropDisclosure.setSelected(true);
             }
             tissueCropControls.setVisible(cropDisclosure.isSelected());
+            if (editTissueCrop.isEnabled()
+                    && editTissueCrop.isSelected() != cropDisclosure.isSelected()) {
+                editTissueCrop.doClick();
+            }
             setup.revalidate();
             setup.repaint();
         });
@@ -1614,7 +1704,7 @@ public final class SwingReviewPanel extends JPanel
 
         final JPanel border = scrollableVerticalPanel();
         boundaryWarpPanel = section("Dense outer-border warp",
-                new JLabel("Points per supported side"),
+                new JLabel("Initial editing detail per supported side"),
                 boundaryControlDensity,
                 includeOppositeHalfRemnant,
                 actionGrid(suggestBoundaryWarpPairs,
@@ -1639,6 +1729,19 @@ public final class SwingReviewPanel extends JPanel
                 applyInteriorStage,
                 resetWarpSide,
                 clearLocalWarp));
+        landmarkControls = landmarkForm();
+        landmarkControls.setVisible(false);
+        final JButton landmarksMode = button("Landmarks", () -> {
+            canvas.setInteractionTool(ReviewCanvas.InteractionTool.LANDMARKS);
+            canvas.setManualWarpEditingEnabled(true); canvas.setSingleTissuePane(false);
+            landmarkControls.setVisible(true); interior.revalidate();
+        });
+        landmarksMode.setName("landmarksMode");
+        final JButton localMode = button("Local points", () -> {
+            canvas.setInteractionTool(ReviewCanvas.InteractionTool.POINTS); canvas.setSingleTissuePane(true);
+            landmarkControls.setVisible(false); interior.revalidate();
+        });
+        interior.add(section("Refinement mode", compactRow(localMode, landmarksMode), landmarkControls));
 
         final JPanel structure = scrollableVerticalPanel();
         structure.add(section("Atlas guide",
@@ -1796,6 +1899,9 @@ public final class SwingReviewPanel extends JPanel
         resetWarpSide.setName("resetWarpSide");
         sectionMode.setName("reviewSectionMode");
         tissueClipping.setName("displayTissueClipping");
+        tissueClipping.setToolTipText(
+                "Limit atlas guides and atlas-region exports to the cyan tissue boundary. "
+                + "Turn off if detection misses tissue. Alignment and drawn ROIs stay fixed; Atlas Undo restores this setting.");
         editTissueCrop.setName("editTissueCrop");
         showDisplacementLines.setName("displayDisplacementLines");
         guideThickness.setName("displayGuideThickness");
@@ -1886,24 +1992,23 @@ public final class SwingReviewPanel extends JPanel
             }
         }
         canvasToolbar.add(stepRail);
-        interactionToolbar.add(compactMeasured(panTool));
-        interactionToolbar.add(compactMeasured(
-                button("Zoom −", canvas::zoomTissueOut)));
-        interactionToolbar.add(compactWidth(
-                button("Fit", this::fitCurrentWorkflowView), 44));
-        interactionToolbar.add(compactMeasured(
-                button("Zoom +", canvas::zoomTissueIn)));
+        interactionToolbar.add(displayOnly(compactMeasured(panTool), "temporaryPanTool"));
+        interactionToolbar.add(displayOnly(compactMeasured(button("Zoom −", canvas::zoomTissueOut)), "viewportZoomOut"));
+        interactionToolbar.add(displayOnly(compactMeasured(button("Fit", this::fitCurrentWorkflowView)), "viewportFit"));
+        interactionToolbar.add(displayOnly(compactMeasured(button("Zoom +", canvas::zoomTissueIn)), "viewportZoomIn"));
         final JPanel opacity = new JPanel(new BorderLayout(2, 0));
         opacity.setPreferredSize(new Dimension(132, 30));
         opacity.add(new JLabel("Overlay"), BorderLayout.WEST);
         opacity.add(overlayOpacity, BorderLayout.CENTER);
-        interactionToolbar.add(opacity);
+        interactionToolbar.add(displayOnly(opacity, "viewportOpacity"));
+        interactionToolbar.add(compactWidth(tissueClipping,
+                tissueClipping.getPreferredSize().width));
         compactMeasured(viewOptions);
         interactionToolbar.add(viewOptions);
         workflowGuide.setName("workflowGuide");
         workflowGuide.setToolTipText(
                 "Open a step-by-step guide for the fast review workflow");
-        interactionToolbar.add(compactMeasured(workflowGuide));
+        interactionToolbar.add(displayOnly(compactMeasured(workflowGuide), "workflowGuide"));
         canvasToolbar.add(interactionToolbar);
         orientationDirect.setToolTipText(
                 "Atlas left appears on image left (default)");
@@ -1931,16 +2036,23 @@ public final class SwingReviewPanel extends JPanel
         allSections.addActionListener(event -> {
             if (returnToSectionsAction != null) returnToSectionsAction.run();
         });
-        persistent.add(compactMeasured(allSections));
+        persistent.add(displayOnly(compactMeasured(allSections), "batchAllSections"));
         persistent.add(compactMeasured(toolbarBack));
         persistent.add(compactMeasured(toolbarNext));
+        stagePrimary.setName("persistentStagePrimary");
+        stagePrimary.addActionListener(event -> stagePrimaryAction());
+        persistent.add(compactMeasured(stagePrimary));
         persistent.add(compactMeasured(toolbarSkip));
         persistent.add(compactMeasured(toolbarUndo));
         persistent.add(compactMeasured(toolbarRedo));
         persistent.add(compactMeasured(toolbarReset));
         persistent.add(compactMeasured(toolbarAccept));
         persistent.add(compactMeasured(toolbarClearWarp));
-        canvasToolbar.add(persistent);
+        final JPanel fixedFooter = new JPanel(new BorderLayout(0, 2));
+        final JPanel states = compactToolbarRow();
+        reviewStates.setName("separateReviewStates"); states.add(reviewStates);
+        fixedFooter.add(states, BorderLayout.NORTH); fixedFooter.add(persistent, BorderLayout.CENTER);
+        add(fixedFooter, BorderLayout.SOUTH);
         host.add(canvasToolbar, BorderLayout.NORTH);
         host.add(canvas, BorderLayout.CENTER);
         compactStatus.setBorder(BorderFactory.createEmptyBorder(2, 6, 2, 6));
@@ -1948,7 +2060,11 @@ public final class SwingReviewPanel extends JPanel
         final JPanel footer = new JPanel(new BorderLayout(6, 0));
         footer.add(compactStatus, BorderLayout.CENTER);
         footer.add(org.atlasalign.plugin.ui.PluginBranding.creditLabel(), BorderLayout.EAST);
-        host.add(footer, BorderLayout.SOUTH);
+        final JPanel canvasFooter = new JPanel(new BorderLayout());
+        overlayLegend.setName("overlayLegend"); overlayLegend.setFont(overlayLegend.getFont().deriveFont(10f));
+        overlayLegend.setBorder(BorderFactory.createEmptyBorder(2, 6, 2, 6));
+        canvasFooter.add(overlayLegend, BorderLayout.NORTH); canvasFooter.add(footer, BorderLayout.SOUTH);
+        host.add(canvasFooter, BorderLayout.SOUTH);
         return host;
     }
 
@@ -1969,8 +2085,9 @@ public final class SwingReviewPanel extends JPanel
         viewPopup.add(showAfter);
         viewPopup.add(showCompare);
         viewPopup.addSeparator();
-        viewPopup.add(tissueClipping);
         viewPopup.add(editTissueCrop);
+        viewPopup.add(outerBoundaries);
+        outerBoundaries.addActionListener(event -> canvas.setOuterBoundariesOnly(outerBoundaries.isSelected()));
         viewPopup.add(showDeformationGrid);
         viewPopup.add(showPointLabels);
         viewPopup.add(showDisplacementLines);
@@ -2012,7 +2129,7 @@ public final class SwingReviewPanel extends JPanel
                 FAST REVIEW WORKFLOW
 
                 0. Setup & Plane
-                Choose Full, Half, or Disjoined; confirm orientation and side; then use the AP slider or Left/Right arrow keys to find the best atlas plane. Drag, resize, or rotate the atlas. Adjust the cyan tissue crop only when needed.
+                Choose Full, Half, or Disjoined; confirm orientation and side; then use the AP slider or Page Up/Page Down to find the best atlas plane. Choose Move, Rotate or Scale. Canvas arrows nudge by 1 source pixel; Shift-arrows use 10. Proportions start locked. Adjust the cyan tissue crop only when needed.
 
                 1. Border (optional)
                 Prepare border points, move all required points, and Ignore or Delete unwanted draft points. Press Calculate border preview once after editing, inspect the cyan preview, then Apply border. Skip when Setup already aligns the outer edge.
@@ -2088,10 +2205,87 @@ public final class SwingReviewPanel extends JPanel
                 ((Number) guideThickness.getValue()).doubleValue());
     }
 
+    private JPanel precisionPlacementControls() {
+        precisionControls.setName("precisionPlacementControls");
+        precisionControls.setLayout(new BoxLayout(precisionControls, BoxLayout.Y_AXIS));
+        precisionControls.setAlignmentX(Component.LEFT_ALIGNMENT);
+        final JPanel tools = compactRow();
+        for (final ReviewCanvas.PlacementTool tool : ReviewCanvas.PlacementTool.values()) {
+            if (tool == ReviewCanvas.PlacementTool.ALL) continue;
+            final String label = tool.name().substring(0, 1) + tool.name().substring(1).toLowerCase(java.util.Locale.ROOT);
+            final JButton choice = button(label, () -> {
+                canvas.setInteractionTool(ReviewCanvas.InteractionTool.TRANSFORM); canvas.setPlacementTool(tool); panTool.setSelected(false);
+                compactStatus.setText(label + " mode · arrow keys nudge 1 source pixel; Shift = 10");
+            });
+            choice.setName("placement" + label); tools.add(choice);
+        }
+        precisionControls.add(tools);
+        lockAspectRatio.setName("lockAtlasProportions"); lockAspectRatio.addActionListener(event -> canvas.setAspectRatioLocked(lockAspectRatio.isSelected()));
+        precisionControls.add(lockAspectRatio);
+        final JPanel numbers = new JPanel(new java.awt.GridLayout(0, 1, 0, 4)) {
+            @Override public Dimension getMinimumSize() { return new Dimension(0, getPreferredSize().height); }
+        };
+        numbers.setName("numericPlacementFields"); numbers.setAlignmentX(Component.LEFT_ALIGNMENT);
+        numbers.setVisible(false);
+        final JToggleButton numeric = new JToggleButton("Numeric adjustments…");
+        numeric.setName("showNumericAdjustments");
+        numeric.addActionListener(event -> {
+            numbers.setVisible(numeric.isSelected());
+            for (java.awt.Container parent = numbers; parent != null; parent = parent.getParent()) parent.invalidate();
+            revalidate();
+            repaint();
+        });
+        precisionControls.add(numeric);
+        final JSpinner dx = precisionNumber(0, -1000000, 1000000, 1, "moveSourceX");
+        final JSpinner dy = precisionNumber(0, -1000000, 1000000, 1, "moveSourceY");
+        numbers.add(precisionRow("Δ X/Y px", dx, dy, button("Move", () -> numericEdit(() -> {
+            dx.commitEdit(); dy.commitEdit(); canvas.translateSourcePixels(number(dx), number(dy));
+            dx.setValue(0.0); dy.setValue(0.0);
+        }))));
+        final JSpinner degrees = precisionNumber(0, -360, 360, .1, "rotateDegrees");
+        numbers.add(precisionRow("Δ angle °", degrees, null, button("Rotate", () -> numericEdit(() -> {
+            degrees.commitEdit(); canvas.rotateDegrees(number(degrees)); degrees.setValue(0.0);
+        }))));
+        final JSpinner sx = precisionNumber(100, 1, 1000, 1, "scaleWidthPercent");
+        final JSpinner sy = precisionNumber(100, 1, 1000, 1, "scaleHeightPercent");
+        numbers.add(precisionRow("Scale %", sx, sy, button("Scale", () -> numericEdit(() -> {
+            sx.commitEdit(); sy.commitEdit(); canvas.scalePercent(number(sx), number(sy)); sx.setValue(100.0); sy.setValue(100.0);
+        }))));
+        sy.setToolTipText("Height percentage is used only when Lock proportions is off");
+        precisionControls.add(numbers);
+        for (final Component control : precisionControls.getComponents()) {
+            if (control instanceof JComponent child) child.setAlignmentX(Component.LEFT_ALIGNMENT);
+        }
+        return precisionControls;
+    }
+
+    private static JPanel precisionRow(final String label, final JSpinner first,
+            final JSpinner second, final JButton apply) {
+        final JPanel row = new JPanel(new GridBagLayout());
+        final GridBagConstraints c = new GridBagConstraints();
+        c.gridy = 0; c.insets = new Insets(0, 2, 0, 2); c.fill = GridBagConstraints.HORIZONTAL;
+        c.gridx = 0; row.add(new JLabel(label), c);
+        c.weightx = 1; c.gridx = 1; row.add(first, c);
+        c.gridx = 2; row.add(second == null ? new JPanel() : second, c);
+        c.weightx = 0; c.gridx = 3; apply.setMargin(new Insets(3, 6, 3, 6)); row.add(apply, c);
+        return row;
+    }
+
+    private static JSpinner precisionNumber(final double value, final double minimum, final double maximum,
+            final double step, final String name) {
+        final JSpinner spinner = new JSpinner(new SpinnerNumberModel(value, minimum, maximum, step));
+        spinner.setName(name); spinner.setPreferredSize(new Dimension(68, 26)); return spinner;
+    }
+    private static double number(final JSpinner spinner) { return ((Number) spinner.getValue()).doubleValue(); }
+    @FunctionalInterface private interface NumericEdit { void run() throws java.text.ParseException; }
+    private void numericEdit(final NumericEdit edit) {
+        try { edit.run(); } catch (java.text.ParseException | IllegalArgumentException error) { showError("Check adjustment", error.getMessage()); }
+    }
+
     private JPanel landmarkForm() {
         final JPanel panel = verticalPanel();
         panel.add(wrappedLabel(
-                "In Points mode, click Atlas first, then the matching Tissue point. "
+                "In Landmarks mode, click Atlas first, then the matching Tissue point. "
                 + "Fits use every active pair on this exact atlas plane."));
         panel.add(wrappedLabel(
                 "Similarity uses two or more pairs for rotation and uniform scale. "
@@ -2879,6 +3073,7 @@ public final class SwingReviewPanel extends JPanel
 
     /** Package-visible target for the active-window Left/Right dispatcher. */
     void nudgeCoronalLevel(final int delta) {
+        if (displayGeometryBlocked) return;
         if (delta == 0 || !levelSlider.isEnabled()) {
             return;
         }
@@ -3577,6 +3772,7 @@ public final class SwingReviewPanel extends JPanel
             accept.setEnabled(!latestModel.accepted()
                     && !transientEditing);
         }
+        updateStagePrimary(); updateReviewStates();
         updateBoundaryFitPanelVisibility();
         stageInspector.revalidate();
         stageInspector.repaint();
@@ -3756,6 +3952,53 @@ public final class SwingReviewPanel extends JPanel
                 // No optional stage to discard here.
             }
         }
+    }
+
+    private AbstractButton primaryDelegate() {
+        return switch (workflowStage) {
+            case SETUP_AND_PLANE, STRUCTURE -> toolbarNext;
+            case MATCH -> latestModel != null && latestModel.boundaryFit().active() ? applyBoundaryFit : suggestBoundaryFit;
+            case BORDER -> latestModel != null && latestModel.boundaryWarp().candidate().isPresent() ? applyBoundaryWarp
+                    : latestModel != null && latestModel.boundaryWarp().active() ? calculateBoundaryWarp : suggestBoundaryWarpPairs;
+            case INTERIOR -> applyInteriorStage;
+            case ACCEPT_EXPORT -> null;
+        };
+    }
+
+    private void updateStagePrimary() {
+        if (controller.isClosed()) return;
+        final AbstractButton delegate = primaryDelegate();
+        final boolean exportReady = manualRoiEditor.exportReady();
+        stagePrimary.setText(workflowStage == ReviewWorkflowStage.SETUP_AND_PLANE ? "Continue to Border"
+                : workflowStage == ReviewWorkflowStage.STRUCTURE ? "Review ROIs"
+                : workflowStage == ReviewWorkflowStage.ACCEPT_EXPORT ? "Export ROIs…" : delegate.getText());
+        stagePrimary.setEnabled(!displayGeometryBlocked && (delegate == null ? exportReady : delegate.isEnabled()));
+        stagePrimary.setToolTipText(stagePrimary.isEnabled() ? "Primary action for this stage"
+                : displayGeometryBlocked ? "Return to the registration plane and wait for its preview"
+                : delegate == null ? "Finish and select at least one ROI before exporting"
+                : delegate.getToolTipText() == null ? "Complete the required edits or preview for this stage first" : delegate.getToolTipText());
+        compactMeasured(stagePrimary);
+    }
+
+    private void stagePrimaryAction() {
+        final AbstractButton delegate = primaryDelegate();
+        if (delegate == null) manualRoiEditor.exportSelected(this);
+        else delegate.doClick();
+    }
+
+    private void updateReviewStates() {
+        if (controller.isClosed()) return;
+        overlayLegend.setText("<html><font color='" + colorHex(canvas.dimRegionColor()) + "'>■</font> Atlas · "
+                + "<font color='#00aabb'>■</font> Crop · <font color='" + colorHex(canvas.selectedRegionColor())
+                + "'>■</font> Guide · ROIs: numbered colors · Holes: red</html>");
+        final var snapshot = manualRoiSession.snapshot();
+        final String exported = lastExport == null ? "not exported" : lastExport.context().equals(controller.captureExportContext())
+                ? "current" : "completed · review edits since export";
+        reviewStates.setText("Alignment: " + (controller.acceptedAlignment().isPresent() ? "accepted" : "needs acceptance")
+                + "   |   ROIs: " + snapshot.exportableRois().size() + " ready / " + snapshot.rois().size() + " total"
+                + "   |   Export: " + exported);
+        reviewStates.setToolTipText("Alignment acceptance is separate from independent manual ROI completion. "
+                + (lastExport == null ? "No export has completed in this open review." : "Last export: " + lastExport.directory()));
     }
 
     private void updateStageSkipLabel() {
@@ -4645,6 +4888,11 @@ public final class SwingReviewPanel extends JPanel
             row.add(button);
         }
         return row;
+    }
+
+    private static String colorHex(final Color color) { return String.format(java.util.Locale.ROOT, "#%06x", color.getRGB() & 0xffffff); }
+    private static <T extends JComponent> T displayOnly(final T control, final String name) {
+        control.setName(name); control.putClientProperty("displayOnlyControl", true); return control;
     }
 
     private static JPanel compactToolbarRow() {

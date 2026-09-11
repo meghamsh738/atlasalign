@@ -27,13 +27,20 @@ import org.atlasalign.application.roi.ReviewerRoiSide;
 import org.atlasalign.application.roi.ReviewerRoiVertex;
 import org.atlasalign.application.roi.RoiPartOperation;
 import org.atlasalign.core.Point2D;
+import org.atlasalign.core.SourceImageMetadata;
+import org.atlasalign.application.RegistrationInput;
+import org.atlasalign.application.export.ExportSelection;
 
 /** Debounced, atomic autosave for one batch section's exact manual ROIs. */
 public final class ManualRoiSessionStore {
 
     public static final String SCHEMA = "atlasalign-manual-roi-draft-v1";
+    public static final String SCOPED_SCHEMA = "atlasalign-manual-roi-draft-v2";
 
     private final Path file;
+    private Path legacyFile;
+    private Optional<RegistrationInput> registrationInput = Optional.empty();
+    private java.util.function.Supplier<ExportSelection> exportSelection;
     private final String sectionId;
     private final int sourceWidth;
     private final int sourceHeight;
@@ -72,14 +79,76 @@ public final class ManualRoiSessionStore {
         writer = Executors.newSingleThreadScheduledExecutor(threads);
     }
 
+    /** Scoped drafts use a new filename; legacy drafts remain untouched. */
+    public ManualRoiSessionStore(final Path legacyPath, final String sectionId,
+            final int sourceWidth, final int sourceHeight, final String sourcePixelSha256,
+            final RegistrationInput input, final java.util.function.Supplier<ExportSelection> selection) {
+        this(scopedFile(legacyPath), sectionId, sourceWidth, sourceHeight, sourcePixelSha256);
+        legacyFile = legacyPath.toAbsolutePath().normalize();
+        registrationInput = Optional.of(Objects.requireNonNull(input, "input"));
+        exportSelection = Objects.requireNonNull(selection, "selection");
+    }
+
+    public static Path scopedFile(final Path legacyPath) {
+        if (legacyPath.getFileName().toString().endsWith("-v2.json")) return legacyPath;
+        return legacyPath.resolveSibling(legacyPath.getFileName().toString().replaceFirst("\\.json$", "") + "-v2.json");
+    }
+
+    public static Optional<RegistrationInput> recordedInput(final Path legacyPath) {
+        final Path candidate = Files.isRegularFile(scopedFile(legacyPath)) ? scopedFile(legacyPath) : legacyPath;
+        if (!Files.isRegularFile(candidate)) return Optional.empty();
+        try {
+            final JsonNode root = new ObjectMapper().readTree(candidate.toFile());
+            if (SCHEMA.equals(root.path("schema").asText())) return Optional.empty();
+            requireEquals(SCOPED_SCHEMA, root.path("schema").asText(), "schema");
+            return Optional.of(new ObjectMapper().treeToValue(root.required("registrationInput"), RegistrationInput.class));
+        } catch (IOException invalid) {
+            throw new IllegalStateException("Could not read draft image scope", invalid);
+        }
+    }
+
+    public static ExportSelection recordedExportSelection(final Path legacyPath,
+            final SourceImageMetadata metadata) {
+        final Optional<RegistrationInput> input = recordedInput(legacyPath);
+        if (input.isEmpty()) {
+            if (metadata.slices() != 1 || metadata.frames() != 1) {
+                throw new IllegalStateException("Legacy multidimensional ROI draft has no optical plane. Open its section review and explicitly select Z/T before exporting.");
+            }
+            return ExportSelection.allChannels(metadata, 1, 1);
+        }
+        try {
+            input.orElseThrow().validateAgainst(metadata);
+            final var mapper = new ObjectMapper();
+            final var root = mapper.readTree(scopedFile(legacyPath).toFile());
+            final ExportSelection selection = mapper.treeToValue(root.required("exportSelection"), ExportSelection.class);
+            selection.validateAgainst(metadata);
+            if (selection.slice() != input.orElseThrow().slice() || selection.frame() != input.orElseThrow().frame()) {
+                throw new IllegalStateException("Saved export scope differs from registration Z/T");
+            }
+            return selection;
+        } catch (IOException invalid) {
+            throw new IllegalStateException("Could not read draft export scope", invalid);
+        }
+    }
+
     public ReviewerRoiSession loadOrCreate() {
-        if (!Files.exists(file)) {
+        final Path readFile = Files.exists(file) || legacyFile == null ? file : legacyFile;
+        if (!Files.exists(readFile)) {
             return new ReviewerRoiSession(
                     sectionId, sourceWidth, sourceHeight);
         }
         try {
-            final JsonNode root = json.readTree(file.toFile());
-            requireEquals(SCHEMA, root.path("schema").asText(), "schema");
+            final JsonNode root = json.readTree(readFile.toFile());
+            final String schema = root.path("schema").asText();
+            if (!SCHEMA.equals(schema) && !SCOPED_SCHEMA.equals(schema)) {
+                throw new IllegalStateException("Unsupported manual ROI draft schema");
+            }
+            if (SCOPED_SCHEMA.equals(schema) && registrationInput.isPresent()) {
+                final RegistrationInput recorded = json.treeToValue(root.required("registrationInput"), RegistrationInput.class);
+                if (!recorded.equals(registrationInput.orElseThrow())) {
+                    throw new IllegalStateException("Saved ROI draft belongs to a different registration C/Z/T. Start a separate review to change input.");
+                }
+            }
             requireEquals(sectionId, root.path("sectionId").asText(),
                     "section ID");
             requireEquals(sourcePixelSha256,
@@ -110,6 +179,11 @@ public final class ManualRoiSessionStore {
                 session, "session");
         schedule(checked.snapshot());
         checked.addListener(() -> schedule(checked.snapshot()));
+    }
+
+    public void bind(final ReviewerRoiSession session, final ReviewController controller) {
+        bind(session);
+        controller.addProjectChangeListener(() -> schedule(session.snapshot()));
     }
 
     public synchronized void saveNow(
@@ -166,7 +240,15 @@ public final class ManualRoiSessionStore {
     private Map<String, Object> document(
             final ReviewerRoiSession.Snapshot snapshot) {
         final Map<String, Object> root = new LinkedHashMap<>();
-        root.put("schema", SCHEMA);
+        root.put("schema", registrationInput.isPresent() ? SCOPED_SCHEMA : SCHEMA);
+        registrationInput.ifPresent(input -> {
+            root.put("registrationInput", input);
+            final ExportSelection selection = exportSelection.get();
+            if (selection.slice() != input.slice() || selection.frame() != input.frame()) {
+                throw new IllegalArgumentException("Draft export scope must use registration Z/T");
+            }
+            root.put("exportSelection", selection);
+        });
         root.put("savedAt", Instant.now().toString());
         root.put("sectionId", sectionId);
         root.put("sourceWidth", sourceWidth);

@@ -56,6 +56,8 @@ public final class ManualHemisphereWarp2D {
     /** Default regular-interior density; structure groups may use four. */
     public static final int DEFAULT_CONTROLS_PER_SIDE = 24;
     public static final int MAXIMUM_MESH_TRIANGLES = 5000;
+    public static final int SNAPSHOT_FORMAT_VERSION = 1;
+    public static final int MAXIMUM_SNAPSHOT_VERTICES = MAXIMUM_MESH_TRIANGLES * 3;
 
     private static final double MINIMUM_LOCAL_SUPPORT_FRACTION = 0.08;
     private static final double MAXIMUM_LOCAL_SUPPORT_FRACTION = 0.14;
@@ -81,6 +83,283 @@ public final class ManualHemisphereWarp2D {
     private final double seamWidth;
     private final Diagnostics diagnostics;
     private final MeshState meshState;
+
+    /** One recorded source vertex and its already-solved displacement. */
+    public record VertexSnapshot(Point2D source, double displacementX,
+            double displacementY, boolean fixed) {
+        public VertexSnapshot {
+            source = Objects.requireNonNull(source, "source");
+            if (!allFinite(displacementX, displacementY)) {
+                throw new IllegalArgumentException("Saved mesh displacements must be finite");
+            }
+        }
+    }
+
+    /** Ordered source-mesh triangle indices; no topology is regenerated. */
+    public record TriangleIndices(int a, int b, int c) {
+        public TriangleIndices {
+            if (a < 0 || b < 0 || c < 0 || a == b || b == c || c == a) {
+                throw new IllegalArgumentException("Saved mesh triangle indices must be distinct and non-negative");
+            }
+        }
+    }
+
+    public record SideSnapshot(AtlasSide atlasSide, ImageSide imageSide,
+            List<Point2D> polygon, List<VertexSnapshot> vertices,
+            List<TriangleIndices> triangles, List<ManualWarpControl> controls,
+            boolean locallySupported) {
+        public SideSnapshot {
+            atlasSide = Objects.requireNonNull(atlasSide, "atlasSide");
+            imageSide = Objects.requireNonNull(imageSide, "imageSide");
+            polygon = snapshotList(polygon, 3, MAXIMUM_SNAPSHOT_VERTICES, "polygon");
+            vertices = snapshotList(vertices, 3, MAXIMUM_SNAPSHOT_VERTICES, "vertices");
+            triangles = snapshotList(triangles, 1, MAXIMUM_MESH_TRIANGLES, "triangles");
+            controls = snapshotList(controls, 0, MAXIMUM_CONTROLS_PER_SIDE, "controls");
+            if (!controls.isEmpty() && controls.size() < MINIMUM_CONTROLS_PER_SIDE) {
+                throw new IllegalArgumentException("An active saved side requires at least four controls");
+            }
+            for (final TriangleIndices triangle : triangles) {
+                if (triangle.a() >= vertices.size() || triangle.b() >= vertices.size()
+                        || triangle.c() >= vertices.size()) {
+                    throw new IllegalArgumentException("Saved mesh triangle index exceeds the vertex count");
+                }
+            }
+            for (final ManualWarpControl control : controls) {
+                if (control.atlasSide() != atlasSide) {
+                    throw new IllegalArgumentException("Saved controls must belong to their recorded side");
+                }
+            }
+            requireTypedCapacity(atlasSide, controls);
+        }
+    }
+
+    /**
+     * Exact solved state. The nullable outline represents the historic FULL
+     * boundary-authoritative domain; absent side entries remain exact identity.
+     */
+    public record Snapshot(int formatVersion, AtlasOrientation orientation,
+            ReviewSectionMode reviewSectionMode, MidlineSegment imageMidline,
+            List<Point2D> imageMidlinePath, int previewWidth, int previewHeight,
+            double seamWidth, Diagnostics diagnostics, List<SideSnapshot> sides,
+            BoundaryAuthoritativeTransform2D.Snapshot outline, String snapshotSha256) {
+        public Snapshot {
+            if (formatVersion != SNAPSHOT_FORMAT_VERSION) {
+                throw new IllegalArgumentException("Unsupported hemisphere mesh snapshot version");
+            }
+            orientation = Objects.requireNonNull(orientation, "orientation");
+            reviewSectionMode = Objects.requireNonNull(reviewSectionMode, "reviewSectionMode");
+            imageMidline = Objects.requireNonNull(imageMidline, "imageMidline");
+            imageMidlinePath = snapshotList(imageMidlinePath, 2,
+                    MAXIMUM_SNAPSHOT_VERTICES, "imageMidlinePath");
+            sides = snapshotList(sides, 1, AtlasSide.values().length, "sides");
+            diagnostics = Objects.requireNonNull(diagnostics, "diagnostics");
+            snapshotSha256 = Objects.requireNonNull(snapshotSha256, "snapshotSha256");
+            if (!orientation.confirmed() || previewWidth <= 1 || previewHeight <= 1
+                    || !Double.isFinite(seamWidth) || seamWidth <= 0
+                    || !imageMidlinePath.get(0).equals(imageMidline.dorsal())
+                    || !imageMidlinePath.get(imageMidlinePath.size() - 1).equals(imageMidline.ventral())
+                    || !ALGORITHM_REVISION.equals(diagnostics.algorithmRevision())
+                    || !PIXEL_CENTER_CONVENTION.equals(diagnostics.pixelCenterConvention())
+                    || diagnostics.orientation() != orientation
+                    || !diagnostics.imageMidline().equals(imageMidline)
+                    || diagnostics.previewWidth() != previewWidth || diagnostics.previewHeight() != previewHeight
+                    || Double.compare(diagnostics.seamWidth(), seamWidth) != 0
+                    || !snapshotSha256.matches("[0-9a-f]{64}")) {
+                throw new IllegalArgumentException("Saved hemisphere mesh metadata is inconsistent");
+            }
+            int previousSide = -1;
+            int triangleCount = 0;
+            final Set<String> controlIds = new HashSet<>();
+            int leftCount = 0;
+            int rightCount = 0;
+            for (final SideSnapshot side : sides) {
+                if (side.atlasSide().ordinal() <= previousSide
+                        || side.imageSide() != imageSideFor(side.atlasSide(), orientation)) {
+                    throw new IllegalArgumentException("Saved mesh sides must be unique, ordered, and correctly oriented");
+                }
+                previousSide = side.atlasSide().ordinal();
+                triangleCount = Math.addExact(triangleCount, side.triangles().size());
+                for (final ManualWarpControl control : side.controls()) {
+                    if (!controlIds.add(control.id())) {
+                        throw new IllegalArgumentException("Saved control IDs must be unique");
+                    }
+                }
+                if (side.atlasSide() == AtlasSide.LEFT) {
+                    leftCount = side.controls().size();
+                } else {
+                    rightCount = side.controls().size();
+                }
+            }
+            if (triangleCount > MAXIMUM_MESH_TRIANGLES
+                    || diagnostics.meshTriangleCount() != triangleCount
+                    || diagnostics.atlasLeftControlCount() != leftCount
+                    || diagnostics.atlasRightControlCount() != rightCount
+                    || (outline == null && !diagnostics.outlineContentSha256().isEmpty())
+                    || (outline != null && (reviewSectionMode != ReviewSectionMode.FULL
+                    || outline.diagnostics().previewWidth() != previewWidth
+                    || outline.diagnostics().previewHeight() != previewHeight
+                    || !diagnostics.outlineContentSha256().equals(outline.diagnostics().contentSha256())))) {
+                throw new IllegalArgumentException("Saved hemisphere mesh counts or outline identity do not match");
+            }
+        }
+    }
+
+    public Snapshot snapshot() {
+        final List<SideSnapshot> sides = meshState.meshes.values().stream()
+                .map(MeshSide::snapshot).toList();
+        final BoundaryAuthoritativeTransform2D.Snapshot outline = meshState.outline == null
+                ? null : meshState.outline.snapshot();
+        final Snapshot unsigned = new Snapshot(SNAPSHOT_FORMAT_VERSION, orientation,
+                reviewSectionMode, imageMidline, imageMidlinePath, previewWidth, previewHeight,
+                seamWidth, diagnostics, sides, outline, "0".repeat(64));
+        return new Snapshot(unsigned.formatVersion(), orientation, reviewSectionMode,
+                imageMidline, imageMidlinePath, previewWidth, previewHeight, seamWidth,
+                diagnostics, sides, outline, snapshotHash(unsigned));
+    }
+
+    /** Copies saved solved patches directly and rebuilds only runtime indexes. */
+    public static ManualHemisphereWarp2D restore(final Snapshot snapshot) {
+        final Snapshot saved = Objects.requireNonNull(snapshot, "snapshot");
+        if (!snapshotHash(saved).equals(saved.snapshotSha256())) {
+            throw new IllegalArgumentException("Saved hemisphere snapshot hash does not match");
+        }
+        final BoundaryAuthoritativeTransform2D outline = saved.outline() == null
+                ? null : BoundaryAuthoritativeTransform2D.restore(saved.outline());
+        if (outline != null && !outline.hemisphereMidlinePath().equals(saved.imageMidlinePath())) {
+            throw new IllegalArgumentException("Saved hemisphere midline does not match its exact outline");
+        }
+        final EnumMap<AtlasSide, MeshSide> meshes = new EnumMap<>(AtlasSide.class);
+        final double diagonal = Math.hypot(saved.previewWidth(), saved.previewHeight());
+        for (final SideSnapshot side : saved.sides()) {
+            meshes.put(side.atlasSide(), new MeshSide(side, saved.imageMidline(), diagonal));
+        }
+        final List<ManualWarpControl> controls = saved.sides().stream()
+                .flatMap(side -> side.controls().stream()).toList();
+        final MeshState state = outline == null
+                ? new MeshState(saved.previewWidth(), saved.previewHeight(), saved.orientation(),
+                        saved.reviewSectionMode(), saved.imageMidline(), saved.imageMidlinePath(), meshes, controls)
+                : new MeshState(outline, saved.orientation(), saved.imageMidline(),
+                        saved.imageMidlinePath(), meshes, controls);
+        if (!state.contentSha256().equals(saved.diagnostics().contentSha256())) {
+            throw new IllegalArgumentException("Saved hemisphere geometry hash does not match");
+        }
+        final MeshAudit audit = state.audit(diagonal);
+        final Diagnostics recorded = saved.diagnostics();
+        final Diagnostics audited = new Diagnostics(ALGORITHM_REVISION, PIXEL_CENTER_CONVENTION,
+                saved.orientation(), saved.imageMidline(), saved.previewWidth(), saved.previewHeight(),
+                saved.seamWidth(), recorded.atlasLeftControlCount(), recorded.atlasRightControlCount(),
+                audit.minimumDeterminant(), audit.minimumSingularValue(), audit.maximumSingularValue(),
+                audit.maximumAnisotropy(), audit.maximumDisplacement(), audit.maximumRoundTripError(),
+                state.contentSha256(), state.triangleCount(), recorded.outlineContentSha256(), recorded.solveNanos());
+        if (!audited.equals(recorded)) {
+            throw new IllegalArgumentException("Saved hemisphere diagnostics do not match the audited mesh");
+        }
+        return new ManualHemisphereWarp2D(saved.orientation(), saved.reviewSectionMode(),
+                saved.imageMidline(), saved.imageMidlinePath(), saved.previewWidth(), saved.previewHeight(),
+                saved.seamWidth(), recorded, state);
+    }
+
+    private static <T> List<T> snapshotList(final List<T> values,
+            final int minimum, final int maximum, final String name) {
+        Objects.requireNonNull(values, name);
+        if (values.size() < minimum || values.size() > maximum) {
+            throw new IllegalArgumentException("Saved " + name + " count is out of bounds");
+        }
+        return List.copyOf(values);
+    }
+
+    /** Full snapshot digest supplements the historic, narrower mesh identity. */
+    private static String snapshotHash(final Snapshot saved) {
+        final MessageDigest digest = sha256();
+        updateString(digest, "atlasalign-hemisphere-snapshot");
+        updateInt(digest, saved.formatVersion());
+        updateString(digest, saved.orientation().name());
+        updateString(digest, saved.reviewSectionMode().name());
+        updateSnapshotPoint(digest, saved.imageMidline().dorsal());
+        updateSnapshotPoint(digest, saved.imageMidline().ventral());
+        updateInt(digest, saved.imageMidlinePath().size());
+        saved.imageMidlinePath().forEach(point -> updateSnapshotPoint(digest, point));
+        updateInt(digest, saved.previewWidth());
+        updateInt(digest, saved.previewHeight());
+        updateSnapshotDouble(digest, saved.seamWidth());
+        final Diagnostics diagnostics = saved.diagnostics();
+        updateString(digest, diagnostics.algorithmRevision());
+        updateString(digest, diagnostics.pixelCenterConvention());
+        updateString(digest, diagnostics.contentSha256());
+        updateString(digest, diagnostics.outlineContentSha256());
+        updateInt(digest, diagnostics.atlasLeftControlCount());
+        updateInt(digest, diagnostics.atlasRightControlCount());
+        updateInt(digest, diagnostics.meshTriangleCount());
+        for (final double value : new double[]{diagnostics.minimumJacobianDeterminant(),
+                diagnostics.minimumSingularValue(), diagnostics.maximumSingularValue(),
+                diagnostics.maximumAnisotropy(), diagnostics.maximumDisplacement(),
+                diagnostics.maximumInverseRoundTripError()}) {
+            updateSnapshotDouble(digest, value);
+        }
+        digest.update(ByteBuffer.allocate(Long.BYTES).putLong(diagnostics.solveNanos()).array());
+        updateInt(digest, saved.sides().size());
+        for (final SideSnapshot side : saved.sides()) {
+            updateString(digest, side.atlasSide().name());
+            updateString(digest, side.imageSide().name());
+            digest.update((byte) (side.locallySupported() ? 1 : 0));
+            updateInt(digest, side.polygon().size());
+            side.polygon().forEach(point -> updateSnapshotPoint(digest, point));
+            updateInt(digest, side.vertices().size());
+            for (final VertexSnapshot vertex : side.vertices()) {
+                updateSnapshotPoint(digest, vertex.source());
+                updateSnapshotDouble(digest, vertex.displacementX());
+                updateSnapshotDouble(digest, vertex.displacementY());
+                digest.update((byte) (vertex.fixed() ? 1 : 0));
+            }
+            updateInt(digest, side.triangles().size());
+            for (final TriangleIndices triangle : side.triangles()) {
+                updateInt(digest, triangle.a());
+                updateInt(digest, triangle.b());
+                updateInt(digest, triangle.c());
+            }
+            updateInt(digest, side.controls().size());
+            for (final ManualWarpControl control : side.controls()) {
+                updateString(digest, control.id());
+                updateString(digest, control.atlasSide().name());
+                updateString(digest, control.origin().name());
+                updateString(digest, control.groupId());
+                updateString(digest, control.structureAcronym());
+                updateSnapshotPoint(digest, control.sourcePoint());
+                updateSnapshotPoint(digest, control.targetPoint());
+            }
+        }
+        digest.update((byte) (saved.outline() == null ? 0 : 1));
+        if (saved.outline() != null) {
+            final BoundaryAuthoritativeTransform2D.Diagnostics boundary = saved.outline().diagnostics();
+            updateInt(digest, saved.outline().formatVersion());
+            // Boundary restore independently verifies its complete geometry hash.
+            updateString(digest, boundary.contentSha256());
+            updateString(digest, boundary.algorithmRevision());
+            updateString(digest, boundary.pixelCenterConvention());
+            updateInt(digest, boundary.previewWidth());
+            updateInt(digest, boundary.previewHeight());
+            updateInt(digest, boundary.commonBoundaryVertexCount());
+            updateInt(digest, boundary.atlasCanonicalTriangleCount());
+            updateInt(digest, boundary.tissueCanonicalTriangleCount());
+            updateInt(digest, boundary.commonRefinedTriangleCount());
+            for (final double value : new double[]{boundary.maximumBoundaryErrorPixels(),
+                    boundary.minimumSourceSignedDoubleArea(), boundary.minimumTargetSignedDoubleArea(),
+                    boundary.sourceMeshArea(), boundary.atlasPolygonArea(), boundary.targetMeshArea(),
+                    boundary.tissuePolygonArea()}) {
+                updateSnapshotDouble(digest, value);
+            }
+        }
+        return HexFormat.of().formatHex(digest.digest());
+    }
+
+    private static void updateSnapshotPoint(final MessageDigest digest, final Point2D point) {
+        updateSnapshotDouble(digest, point.x());
+        updateSnapshotDouble(digest, point.y());
+    }
+
+    private static void updateSnapshotDouble(final MessageDigest digest, final double value) {
+        digest.update(ByteBuffer.allocate(Long.BYTES).putLong(Double.doubleToRawLongBits(value)).array());
+    }
 
     private ManualHemisphereWarp2D(
             final AtlasOrientation orientation,
@@ -1496,6 +1775,181 @@ public final class ManualHemisphereWarp2D {
         private final boolean locallySupported;
         private final double maximumRequestedDisplacement;
         private final double previewDiagonal;
+
+        /** Direct restoration path; it deliberately never constructs a solver. */
+        private MeshSide(final SideSnapshot saved,
+                final MidlineSegment midline, final double diagonal) {
+            this.atlasSide = saved.atlasSide();
+            this.imageSide = saved.imageSide();
+            this.midline = midline;
+            this.polygon = saved.polygon();
+            final List<Segment> segments = new ArrayList<>();
+            for (int index = 0; index < polygon.size(); index++) {
+                segments.add(new Segment(polygon.get(index), polygon.get((index + 1) % polygon.size())));
+            }
+            this.boundarySegments = List.copyOf(segments);
+            this.vertices = saved.vertices().stream().map(VertexSnapshot::source).toList();
+            this.triangles = saved.triangles().stream()
+                    .map(value -> new Triangle(value.a(), value.b(), value.c())).toList();
+            this.edges = uniqueEdges(triangles);
+            this.controls = saved.controls();
+            this.locallySupported = saved.locallySupported();
+            this.fixed = new boolean[vertices.size()];
+            this.displacementX = new double[vertices.size()];
+            this.displacementY = new double[vertices.size()];
+            for (int index = 0; index < vertices.size(); index++) {
+                final VertexSnapshot vertex = saved.vertices().get(index);
+                fixed[index] = vertex.fixed();
+                displacementX[index] = vertex.displacementX();
+                displacementY[index] = vertex.displacementY();
+            }
+            final Map<PointKey, Point2D> targetsBySource = new HashMap<>();
+            final Map<PointKey, Point2D> sourcesByTarget = new HashMap<>();
+            final Set<Integer> controlVertices = new HashSet<>();
+            double requested = 0;
+            for (final ManualWarpControl control : controls) {
+                if (!strictlyInside(polygon, control.sourcePoint())
+                        || !strictlyInside(polygon, control.targetPoint())) {
+                    throw new IllegalArgumentException("Saved controls must remain inside their side domain");
+                }
+                final int vertex = findExactVertex(vertices, control.sourcePoint());
+                if (vertex < 0 || !fixed[vertex] || !controlVertices.add(vertex)
+                        || distance(displaced(vertices.get(vertex), vertex), control.targetPoint())
+                                > MESH_CONTAINMENT_EPSILON
+                        || targetsBySource.put(PointKey.of(control.sourcePoint()), control.targetPoint()) != null
+                        || sourcesByTarget.put(PointKey.of(control.targetPoint()), control.sourcePoint()) != null) {
+                    throw new IllegalArgumentException("Saved controls do not match their solved mesh vertices");
+                }
+                requested = Math.max(requested, distance(control.sourcePoint(), control.targetPoint()));
+            }
+            this.maximumRequestedDisplacement = requested;
+            this.previewDiagonal = diagonal;
+            this.sourceControlTargets = Map.copyOf(targetsBySource);
+            this.targetControlSources = Map.copyOf(sourcesByTarget);
+            for (int index = 0; index < vertices.size(); index++) {
+                final boolean boundary = onBoundary(vertices.get(index));
+                if (fixed[index] != (boundary || controlVertices.contains(index))
+                        || (boundary && (displacementX[index] != 0 || displacementY[index] != 0))) {
+                    throw new IllegalArgumentException("Saved fixed vertices must preserve the boundary and control constraints");
+                }
+            }
+            auditSourceTopology(controlVertices);
+            this.sourceTriangleIndex = TriangleSpatialIndex.source(vertices, triangles);
+            this.targetTriangleIndex = TriangleSpatialIndex.target(vertices, triangles, displacementX, displacementY);
+        }
+
+        private SideSnapshot snapshot() {
+            final List<VertexSnapshot> savedVertices = new ArrayList<>(vertices.size());
+            for (int index = 0; index < vertices.size(); index++) {
+                savedVertices.add(new VertexSnapshot(vertices.get(index),
+                        displacementX[index], displacementY[index], fixed[index]));
+            }
+            return new SideSnapshot(atlasSide, imageSide, polygon, savedVertices,
+                    triangles.stream().map(value -> new TriangleIndices(value.a(), value.b(), value.c())).toList(),
+                    controls, locallySupported);
+        }
+
+        /** Imported topology has not passed through the normal triangulator. */
+        private void auditSourceTopology(final Set<Integer> controlVertices) {
+            final double area = polygonArea(polygon);
+            if (!Double.isFinite(area) || area <= MESH_MIN_TRIANGLE_AREA) {
+                throw new IllegalArgumentException("Saved side polygon must have finite positive area");
+            }
+            for (int first = 0; first < boundarySegments.size(); first++) {
+                final Segment a = boundarySegments.get(first);
+                if (distance(a.a(), a.b()) <= MESH_MIN_TRIANGLE_AREA) {
+                    throw new IllegalArgumentException("Saved side polygon contains a zero-length edge");
+                }
+                for (int second = first + 1; second < boundarySegments.size(); second++) {
+                    if (second == first + 1 || (first == 0 && second == boundarySegments.size() - 1)) {
+                        continue;
+                    }
+                    final Segment b = boundarySegments.get(second);
+                    if (properSegmentIntersection(a.a(), a.b(), b.a(), b.b())
+                            || distancePointSegment(a.a(), b.a(), b.b()) <= MESH_EPSILON
+                            || distancePointSegment(a.b(), b.a(), b.b()) <= MESH_EPSILON
+                            || distancePointSegment(b.a(), a.a(), a.b()) <= MESH_EPSILON
+                            || distancePointSegment(b.b(), a.a(), a.b()) <= MESH_EPSILON) {
+                        throw new IllegalArgumentException("Saved side polygon must be simple and unpinched");
+                    }
+                }
+            }
+            final Set<Point2D> uniqueVertices = new HashSet<>();
+            for (final Point2D point : vertices) {
+                if (!uniqueVertices.add(point) || !containsInclusive(polygon, point)) {
+                    throw new IllegalArgumentException("Saved source mesh vertices must be distinct and inside the side domain");
+                }
+            }
+            final Set<TriangleIndices> uniqueFaces = new HashSet<>();
+            final Map<Long, Integer> edgeCounts = new HashMap<>();
+            final Map<Long, Integer> edgeDirections = new HashMap<>();
+            final boolean[] used = new boolean[vertices.size()];
+            final List<TargetTriangle> sourceTriangles = new ArrayList<>(triangles.size());
+            double meshArea = 0;
+            for (final Triangle triangle : triangles) {
+                final int[] ordered = {triangle.a(), triangle.b(), triangle.c()};
+                Arrays.sort(ordered);
+                if (!uniqueFaces.add(new TriangleIndices(ordered[0], ordered[1], ordered[2]))) {
+                    throw new IllegalArgumentException("Saved source mesh has duplicate triangles");
+                }
+                final Point2D a = vertices.get(triangle.a());
+                final Point2D b = vertices.get(triangle.b());
+                final Point2D c = vertices.get(triangle.c());
+                final double doubleArea = cross(a, b, c);
+                if (!Double.isFinite(doubleArea) || doubleArea <= MESH_MIN_TRIANGLE_AREA
+                        || !triangleContained(a, b, c)) {
+                    throw new IllegalArgumentException("Saved source triangles must have positive area and remain inside the side domain");
+                }
+                meshArea += 0.5 * doubleArea;
+                sourceTriangles.add(new TargetTriangle(triangle, a, b, c));
+                for (final int vertex : ordered) {
+                    used[vertex] = true;
+                }
+                for (final Edge edge : List.of(new Edge(triangle.a(), triangle.b()),
+                        new Edge(triangle.b(), triangle.c()), new Edge(triangle.c(), triangle.a()))) {
+                    final long key = edgeKey(edge.a(), edge.b());
+                    if (edgeCounts.merge(key, 1, Integer::sum) > 2) {
+                        throw new IllegalArgumentException("Saved source mesh has a non-manifold edge");
+                    }
+                    edgeDirections.merge(key, edge.a() < edge.b() ? 1 : -1, Integer::sum);
+                }
+            }
+            if (Math.abs(meshArea - area) > Math.max(1e-6, area * 1e-8)) {
+                throw new IllegalArgumentException("Saved source mesh does not cover its side polygon");
+            }
+            for (final Edge edge : edges) {
+                final long key = edgeKey(edge.a(), edge.b());
+                if (edgeCounts.get(key) == 2) {
+                    if (edgeDirections.get(key) != 0) {
+                        throw new IllegalArgumentException("Saved adjacent source triangles have inconsistent winding");
+                    }
+                } else if (!onBoundary(vertices.get(edge.a())) || !onBoundary(vertices.get(edge.b()))
+                        || !onBoundary(interpolate(vertices.get(edge.a()), vertices.get(edge.b()), 0.5))) {
+                    throw new IllegalArgumentException("Saved source mesh has an internal gap");
+                }
+            }
+            for (final int control : controlVertices) {
+                if (!used[control]) {
+                    throw new IllegalArgumentException("Saved control is disconnected from the source mesh");
+                }
+            }
+            for (int first = 0; first < sourceTriangles.size(); first++) {
+                final TargetTriangle a = sourceTriangles.get(first);
+                for (int second = first + 1; second < sourceTriangles.size(); second++) {
+                    final TargetTriangle b = sourceTriangles.get(second);
+                    if (!shareEdge(a.source(), b.source()) && (positiveAreaOverlap(a, b)
+                            || strictlyInsideTriangle(b.a(), b.b(), b.c(), triangleCentroid(a))
+                            || strictlyInsideTriangle(a.a(), a.b(), a.c(), triangleCentroid(b)))) {
+                        throw new IllegalArgumentException("Saved source mesh triangles overlap");
+                    }
+                }
+            }
+        }
+
+        private static Point2D triangleCentroid(final TargetTriangle triangle) {
+            return new Point2D((triangle.a().x() + triangle.b().x() + triangle.c().x()) / 3.0,
+                    (triangle.a().y() + triangle.b().y() + triangle.c().y()) / 3.0);
+        }
 
         private MeshSide(
                 final AtlasSide atlasSide,

@@ -15,6 +15,8 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Function;
 import java.util.function.Supplier;
 import org.atlasalign.application.AcceptedAlignmentSnapshot;
+import org.atlasalign.application.RegistrationInput;
+import org.atlasalign.application.export.ExportSelection;
 import org.atlasalign.application.AlignmentReviewContent;
 import org.atlasalign.application.AlignmentReviewSession;
 import org.atlasalign.application.AlignmentReviewState;
@@ -106,6 +108,14 @@ public final class ReviewController implements AutoCloseable {
     private final BoundaryWarpSolver boundaryWarpSolver =
             new BoundaryWarpSolver();
 
+    private RegistrationInput registrationInput = new RegistrationInput(1, 1, 1);
+    private ExportSelection exportSelection;
+    private org.atlasalign.application.DisplaySettings displaySettings;
+    private final List<Runnable> projectChangeListeners = new java.util.concurrent.CopyOnWriteArrayList<>();
+    public record ExportContext(long alignmentRevision, Optional<org.atlasalign.application.roi.ReviewerRoiSession.Snapshot> rois, ExportSelection selection) { }
+    public record CompletedExport(java.nio.file.Path directory, ExportContext context) { }
+    private java.util.function.Supplier<org.atlasalign.application.roi.ReviewerRoiSession.Snapshot> roiSnapshotSupplier;
+    private final List<java.util.function.Consumer<CompletedExport>> exportListeners = new java.util.concurrent.CopyOnWriteArrayList<>();
     private ReviewView view;
     private AtlasCoronalPlane atlasPlane;
     private boolean atlasPlaneLoading;
@@ -199,6 +209,9 @@ public final class ReviewController implements AutoCloseable {
             final Executor viewExecutor,
             final Runnable executorShutdown) {
         this.session = Objects.requireNonNull(session, "session");
+        exportSelection = ExportSelection.allChannels(session.state().basis().sourceSnapshot().metadata(), 1, 1);
+        displaySettings = org.atlasalign.application.DisplaySettings.defaults(
+                session.state().basis().sourceSnapshot().metadata(), registrationInput);
         this.preview = Objects.requireNonNull(preview, "preview");
         final var expectedPreview = session.state().basis()
                 .previewDimensions();
@@ -230,9 +243,71 @@ public final class ReviewController implements AutoCloseable {
         requestAtlasPlane(session.state().content().coronalLevel());
     }
 
+    /** Set exactly once at launch, before attaching a view. A new basis needs a new review. */
+    public synchronized void initializeImageScope(final RegistrationInput input) {
+        if (view != null) throw new IllegalStateException("Save this project and start a new review to change registration input");
+        input.validateAgainst(session.state().basis().sourceSnapshot().metadata());
+        registrationInput = input;
+        exportSelection = ExportSelection.allChannels(session.state().basis().sourceSnapshot().metadata(), input.slice(), input.frame());
+        displaySettings = org.atlasalign.application.DisplaySettings.defaults(session.state().basis().sourceSnapshot().metadata(), input);
+    }
+
+    public void addProjectChangeListener(final Runnable listener) {
+        projectChangeListeners.add(Objects.requireNonNull(listener, "listener"));
+    }
+
+    public synchronized void bindRoiSnapshots(final java.util.function.Supplier<org.atlasalign.application.roi.ReviewerRoiSession.Snapshot> supplier) { roiSnapshotSupplier = Objects.requireNonNull(supplier); }
+    public synchronized ExportContext captureExportContext() {
+        return new ExportContext(session.state().contentRevision(), Optional.ofNullable(roiSnapshotSupplier).map(java.util.function.Supplier::get), exportSelection);
+    }
+    public synchronized ExportContext captureExportContext(final org.atlasalign.application.roi.ReviewerRoiSession.Snapshot rois) {
+        return new ExportContext(session.state().contentRevision(), Optional.of(rois), exportSelection);
+    }
+    public void addExportListener(final java.util.function.Consumer<CompletedExport> listener) { exportListeners.add(Objects.requireNonNull(listener)); }
+    public void recordCompletedExport(final java.nio.file.Path directory, final ExportContext context) {
+        exportListeners.forEach(listener -> listener.accept(new CompletedExport(directory, context)));
+    }
+
+    public synchronized RegistrationInput registrationInput() { return registrationInput; }
+    public synchronized ExportSelection exportSelection() { return exportSelection; }
+
+    public synchronized org.atlasalign.application.DisplaySettings displaySettings() { return displaySettings; }
+
+    public synchronized void setDisplaySettings(final org.atlasalign.application.DisplaySettings settings) {
+        settings.validateAgainst(session.state().basis().sourceSnapshot().metadata());
+        if (settings.equals(displaySettings)) return;
+        displaySettings = settings;
+        viewExecutor.execute(() -> { if (!closed) projectChangeListeners.forEach(Runnable::run); });
+    }
+
+    public synchronized org.atlasalign.application.AlignmentReviewCheckpoint checkpoint() { return session.checkpoint(); }
+
+    public synchronized Optional<Integer> selectedRegionId() { return selectedAtlasRegion.map(SelectedAtlasRegion::rootRegionId); }
+    public synchronized boolean showAtlasAnatomy() { return showAtlasAnatomy; }
+
+    public synchronized void restoreSelectedRegion(final Optional<Integer> regionId) {
+        if (regionId.isEmpty()) { clearSelectedAtlasRegion(); return; }
+        final String acronym = regionCatalog.orElseThrow(() -> new IllegalArgumentException("Atlas has no region catalogue"))
+                .hierarchy().stream().filter(region -> region.id() == regionId.orElseThrow())
+                .findFirst().orElseThrow(() -> new IllegalArgumentException("Saved atlas region is missing")).acronym();
+        selectAtlasRegionExactAcronym(acronym);
+    }
+
+    public synchronized void setExportSelection(final ExportSelection selection) {
+        selection.validateAgainst(session.state().basis().sourceSnapshot().metadata());
+        if (selection.slice() != registrationInput.slice() || selection.frame() != registrationInput.frame()) {
+            throw new IllegalArgumentException("Export must use the pinned registration Z/T");
+        }
+        exportSelection = selection;
+        publish();
+    }
+
     public synchronized AlignmentReviewState state() {
         return session.state();
     }
+
+    public ReviewPreview registrationPreview() { return preview; }
+    public synchronized AtlasCoronalPlane exportPreviewPlane() { return requireCurrentAtlasPlane(); }
 
     /** Returns and clears one concise completion notice for the Swing status. */
     public synchronized Optional<String> takeManualWarpStatusMessage() {
@@ -5777,6 +5852,7 @@ public final class ReviewController implements AutoCloseable {
                     return;
                 }
             }
+            projectChangeListeners.forEach(Runnable::run);
             target.render(model);
         });
     }

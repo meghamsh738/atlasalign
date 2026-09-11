@@ -13,7 +13,7 @@ The desktop app may be called `Fiji.app`; its root contains `jars` and `plugins`
    Use a download with its bundled Java runtime. AtlasAlign needs Java 17+;
    an older Java 8 Fiji installation is unsuitable. Extract Fiji into a writable
    folder, and keep track of which copy you will use.
-2. Download **[atlasalign-lite-0.1.0-beta.1.zip](https://github.com/meghamsh738/atlasalign/releases/download/v0.1.0-beta.1/atlasalign-lite-0.1.0-beta.1.zip)**.
+2. Download **[atlasalign-lite-0.1.0-beta.3.zip](https://github.com/meghamsh738/atlasalign/releases/download/v0.1.0-beta.3/atlasalign-lite-0.1.0-beta.3.zip)**.
    This is the plugin bundle. GitHub's automatic **Source code** archives are
    for developers and cannot be installed as the plugin.
 3. Keep [the demo and mock IF image](DEMO.md) separately from Fiji's installation.
@@ -21,11 +21,11 @@ The desktop app may be called `Fiji.app`; its root contains `jars` and `plugins`
 
 ## Copy the plugin files
 
-1. Close that Fiji copy. Extract `atlasalign-lite-0.1.0-beta.1.zip` elsewhere.
+1. Close that Fiji copy. Extract `atlasalign-lite-0.1.0-beta.3.zip` elsewhere.
 2. Check the archive SHA-256 against the release `SHA256SUMS.txt`. If Python is
    available, also run `python verify_bundle.py` from the extracted bundle.
    Python is optional for file verification and is not needed to run manual alignment.
-3. Copy the six `plugins/atlasalign-*-0.1.0-beta.1.jar` files into Fiji's
+3. Copy the six `plugins/atlasalign-*-0.1.0-beta.3.jar` files into Fiji's
    `plugins` directory. Remove earlier **AtlasAlign** versions from that directory
    and `jars` first, keeping a backup outside Fiji.
 4. Check Fiji's `jars` directory for **`jackson-core`**, **`jackson-annotations`**
@@ -43,7 +43,7 @@ The desktop app may be called `Fiji.app`; its root contains `jars` and `plugins`
    Other Jackson modules (such as `jackson-dataformat-xml`) are separate
    libraries; leave them unchanged. Do not replace the entire `jars` directory.
 5. Restart Fiji. **Plugins → AtlasAlign Lite → About AtlasAlign Lite** should
-   report `0.1.0-beta.1`. Use **Atlas Setup** to configure the atlas.
+   report `0.1.0-beta.3`. Use **Atlas Setup** to configure the atlas.
 
 Fiji supplies ImageJ, SciJava and Bio-Formats; this bundle does not replace them.
 The experimental ABBA adapter is not part of the user plugin bundle.
@@ -56,11 +56,11 @@ or `jars` folder, and do not put the bundle ZIP into `plugins`.
 
 If multiple Fiji copies are installed, launch the one you just changed. Verify
 its **About AtlasAlign Lite** version before following the demo. The public
-release covered by these instructions is **0.1.0-beta.1**.
+release covered by these instructions is **0.1.0-beta.3**.
 
 ## Try the mock IF image and export
 
-1. Complete Atlas Setup below, then download [mock-if-example.tif](https://github.com/meghamsh738/atlasalign/releases/download/v0.1.0-beta.1/mock-if-example.tif).
+1. Complete Atlas Setup below, then download [mock-if-example.tif](https://github.com/meghamsh738/atlasalign/releases/download/v0.1.0-beta.3/mock-if-example.tif).
 2. In the verified Fiji copy, choose **File → Open** and select the TIFF.
 3. Choose **Plugins → AtlasAlign Lite → Review Atlas Alignment**. For the manual
    workflow, leave optional DeepSlice disabled.

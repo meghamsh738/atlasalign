@@ -39,7 +39,7 @@ The video removes pauses and indicates accelerated sections. Its single-section
 footage uses an earlier review UI. The batch portion is a labeled walkthrough
 of verified native screenshots, not a recording of automatic batch completion.
 It shows the queue, numbered overview, section selection and individual review.
-The public install remains beta.1; this media update does not publish a new plugin.
+The current download is beta.3; the video remains a demonstration recorded with the earlier interface.
 
 ## Where exports are saved
 

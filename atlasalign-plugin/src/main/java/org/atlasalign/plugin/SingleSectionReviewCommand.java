@@ -58,6 +58,9 @@ public final class SingleSectionReviewCommand implements Command {
         private final int[] ids;
         private final JComboBox<String> source = new JComboBox<>();
         private final JSpinner channel = new JSpinner(new SpinnerNumberModel(1, 1, 1, 1));
+        private final JSpinner slice = new JSpinner(new SpinnerNumberModel(1, 1, 1, 1));
+        private final JSpinner frame = new JSpinner(new SpinnerNumberModel(1, 1, 1, 1));
+        private final JLabel dimensions = new JLabel();
         private final JSpinner preview = new JSpinner(new SpinnerNumberModel(2048, 64, Integer.MAX_VALUE, 256));
         private final JSpinner level = new JSpinner(new SpinnerNumberModel(264, 0, 527, 1));
         private final JCheckBox deepSlice = new JCheckBox("Suggest an initial level with local DeepSlice", false);
@@ -79,8 +82,11 @@ public final class SingleSectionReviewCommand implements Command {
             }
             source.setSelectedIndex(selected);
             fields.add(row("Section image", source));
-            fields.add(row("Tissue channel", channel));
-            fields.add(new JLabel("Channel used to locate tissue (1 = first channel)."));
+            fields.add(dimensions);
+            fields.add(row("Registration channel", channel));
+            fields.add(row("Optical Z", slice));
+            fields.add(row("Time point", frame));
+            fields.add(new JLabel("Geometry is pinned to this C/Z/T. Export defaults to all channels at this Z/T."));
             fields.add(row("Preview size (pixels)", preview));
             fields.add(new JLabel("Longest preview edge; smaller previews prepare faster."));
             fields.add(row("Initial atlas level (0–527)", level));
@@ -113,6 +119,19 @@ public final class SingleSectionReviewCommand implements Command {
             channel.setModel(new SpinnerNumberModel(
                     ReviewAlignmentCommand.registrationChannelDefault(image), 1,
                     image == null ? 1 : Math.max(1, image.getNChannels()), 1));
+            slice.setModel(new SpinnerNumberModel(image == null ? 1 : image.getZ(), 1,
+                    image == null ? 1 : image.getNSlices(), 1));
+            frame.setModel(new SpinnerNumberModel(image == null ? 1 : image.getT(), 1,
+                    image == null ? 1 : image.getNFrames(), 1));
+            if (image != null) {
+                final var calibration = image.getCalibration();
+                dimensions.setText(String.format(java.util.Locale.ROOT,
+                        "%d × %d px · C%d Z%d T%d · %d-bit · %.4g × %.4g × %.4g %s",
+                        image.getWidth(), image.getHeight(), image.getNChannels(),
+                        image.getNSlices(), image.getNFrames(), image.getBitDepth(),
+                        calibration.pixelWidth, calibration.pixelHeight, calibration.pixelDepth,
+                        calibration.getUnit()));
+            }
         }
 
         private ImagePlus selectedImage() {
@@ -122,6 +141,8 @@ public final class SingleSectionReviewCommand implements Command {
         Map<String, Object> inputs() {
             try {
                 channel.commitEdit();
+                slice.commitEdit();
+                frame.commitEdit();
                 preview.commitEdit();
                 level.commitEdit();
             } catch (java.text.ParseException invalid) {
@@ -130,6 +151,8 @@ public final class SingleSectionReviewCommand implements Command {
             final Map<String, Object> inputs = new LinkedHashMap<>();
             inputs.put("sourceImage", selectedImage());
             inputs.put("registrationChannel", channel.getValue());
+            inputs.put("registrationSlice", slice.getValue());
+            inputs.put("registrationFrame", frame.getValue());
             inputs.put("maximumPreviewDimension", preview.getValue());
             inputs.put("initialCoronalLevel", level.getValue());
             inputs.put("useLocalDeepSlice", deepSlice.isSelected());
